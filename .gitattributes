@@ -1,0 +1,3 @@
+/scripts/skill_pipeline.py whitespace=cr-at-eol
+/scripts/skill_workflow.py whitespace=cr-at-eol
+/skills/text-analysis.manifest.json whitespace=cr-at-eol

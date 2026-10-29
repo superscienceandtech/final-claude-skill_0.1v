@@ -1,0 +1,23 @@
+{
+  "manifest_version": 1,
+  "identifier": "text-analysis",
+  "name": "Local text analysis",
+  "description": "Count characters, words, and lines for supplied text.",
+  "source_path": "scripts/tool_framework.py",
+  "version": "0.1",
+  "contract_version": "1.2.0",
+  "category": "text-processing",
+  "tags": ["text", "analysis"],
+  "inputs": [],
+  "outputs": [],
+  "input_fields": [
+    {"name": "text", "value_type": "string", "required": true}
+  ],
+  "output_fields": [
+    {"name": "statistics", "value_type": "object", "required": true}
+  ],
+  "strict_inputs": true,
+  "strict_outputs": true,
+  "tools": ["local.text-statistics"],
+  "capabilities": ["local-text-analysis"]
+}
