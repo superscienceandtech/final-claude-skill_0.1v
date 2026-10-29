@@ -1,0 +1,635 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Tests for report generation semantics across all reporter formats."""
+
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime
+from urllib.parse import unquote, unquote_to_bytes, urlsplit
+
+import pytest
+from markdown_it import MarkdownIt
+
+from skill_scanner.core.models import Finding, Report, ScanResult, Severity, ThreatCategory
+from skill_scanner.core.reporters.json_reporter import JSONReporter
+from skill_scanner.core.reporters.markdown_reporter import MarkdownReporter
+from skill_scanner.core.reporters.sarif_reporter import SARIFReporter
+from skill_scanner.core.reporters.table_reporter import TableReporter
+
+
+def _sample_findings() -> list[Finding]:
+    long_title = "Command injection in deployment helper script executes untrusted input"
+    long_path = "scripts/deeply/nested/path/deploy_helper_script_with_long_name.sh"
+    return [
+        Finding(
+            id="FIND-001",
+            rule_id="COMMAND_INJECTION_001",
+            category=ThreatCategory.COMMAND_INJECTION,
+            severity=Severity.CRITICAL,
+            title=long_title,
+            description="Unsanitized input flows into shell execution.",
+            file_path=long_path,
+            line_number=42,
+            snippet="subprocess.run(user_input, shell=True)",
+            remediation="Avoid shell=True and sanitize user-controlled inputs.",
+            analyzer="static",
+            metadata={"confidence": 0.97},
+        ),
+        Finding(
+            id="FIND-002",
+            rule_id="OBFUSCATION_001",
+            category=ThreatCategory.OBFUSCATION,
+            severity=Severity.HIGH,
+            title="Encoded payload is decoded before runtime execution",
+            description="Code decodes and executes a base64 payload.",
+            file_path="scripts/decoder.py",
+            line_number=11,
+            snippet="```python\nexec(base64.b64decode(payload))\n```",
+            remediation="Remove dynamic execution and decode paths.",
+            analyzer="behavioral",
+            metadata={"confidence": 0.91},
+        ),
+        Finding(
+            id="FIND-003",
+            rule_id="SOCIAL_ENGINEERING_001",
+            category=ThreatCategory.SOCIAL_ENGINEERING,
+            severity=Severity.LOW,
+            title="Misleading skill description",
+            description="Manifest description does not match behavior.",
+            file_path="SKILL.md",
+            analyzer="static",
+            metadata={"confidence": 0.63},
+        ),
+    ]
+
+
+@pytest.fixture
+def scan_result() -> ScanResult:
+    return ScanResult(
+        skill_name="dangerous-helper",
+        skill_directory="/tmp/dangerous-helper",
+        findings=_sample_findings(),
+        scan_duration_seconds=1.234,
+        analyzers_used=["static", "behavioral"],
+        timestamp=datetime(2026, 1, 2, 3, 4, 5),
+    )
+
+
+@pytest.fixture
+def report(scan_result: ScanResult) -> Report:
+    safe_result = ScanResult(
+        skill_name="safe-helper",
+        skill_directory="/tmp/safe-helper",
+        findings=[],
+        scan_duration_seconds=0.456,
+        analyzers_used=["static"],
+        timestamp=datetime(2026, 1, 2, 3, 5, 0),
+    )
+
+    aggregate = Report(timestamp=datetime(2026, 1, 2, 3, 6, 0))
+    aggregate.add_scan_result(scan_result)
+    aggregate.add_scan_result(safe_result)
+    return aggregate
+
+
+def test_json_reporter_pretty_and_compact_are_semantically_equal(scan_result: ScanResult):
+    pretty_reporter = JSONReporter(pretty=True)
+    compact_reporter = JSONReporter(pretty=False)
+
+    pretty_json = pretty_reporter.generate_report(scan_result)
+    compact_json = compact_reporter.generate_report(scan_result)
+
+    pretty_payload = json.loads(pretty_json)
+    compact_payload = json.loads(compact_json)
+
+    assert pretty_payload == compact_payload
+    assert pretty_payload["skill_name"] == "dangerous-helper"
+    assert pretty_payload["findings_count"] == 3
+    assert pretty_payload["max_severity"] == "CRITICAL"
+    assert pretty_payload["duration_ms"] == 1234
+    assert pretty_payload["findings"][0]["analyzer"] == "static"
+
+
+def test_json_reporter_multi_skill_summary_is_correct(report: Report):
+    output = JSONReporter(pretty=True).generate_report(report)
+    payload = json.loads(output)
+
+    summary = payload["summary"]
+    assert summary["total_skills_scanned"] == 2
+    assert summary["safe_skills"] == 1
+    assert summary["total_findings"] == 3
+    assert summary["findings_by_severity"] == {
+        "critical": 1,
+        "high": 1,
+        "medium": 0,
+        "low": 1,
+        "info": 0,
+    }
+
+
+def test_markdown_reporter_single_scan_has_grouping_and_location(scan_result: ScanResult):
+    output = MarkdownReporter(detailed=True).generate_report(scan_result)
+
+    assert "# Agent Skill Security Scan Report" in output
+    assert "### CRITICAL Severity" in output
+    assert "**Location:** scripts/deeply/nested/path/deploy_helper_script_with_long_name.sh:42" in output
+    assert "**Remediation:** Avoid shell=True and sanitize user-controlled inputs." in output
+    # One snippet is plain text (auto-fenced), one is pre-fenced (preserved)
+    assert output.count("```") == 4
+
+
+def test_markdown_reporter_multi_skill_contains_statuses_and_counts(report: Report):
+    output = MarkdownReporter(detailed=False).generate_report(report)
+
+    assert "- **Total Skills Scanned:** 2" in output
+    assert "- **Safe Skills:** 1" in output
+    assert "### [FAIL] dangerous-helper" in output
+    assert "### [OK] safe-helper" in output
+
+
+def test_table_reporter_single_scan_truncates_long_fields_and_shows_snippets(scan_result: ScanResult):
+    output = TableReporter(format_style="plain", show_snippets=True).generate_report(scan_result)
+
+    expected_title = "Command injection in deployment helper s..."
+    expected_location = "scripts/deeply/nested/path/dep..."
+
+    assert "Detailed Findings:" in output
+    assert expected_title in output
+    assert expected_location in output
+    assert "CODE EVIDENCE" in output
+    assert "subprocess.run(user_input, shell=True)" in output
+
+
+def test_table_reporter_multi_skill_includes_overview_table(report: Report):
+    output = TableReporter(format_style="simple").generate_report(report)
+
+    assert "Skills Overview:" in output
+    assert "dangerous-helper" in output
+    assert "safe-helper" in output
+    assert "[FAIL] ISSUES" in output
+    assert "[OK] SAFE" in output
+
+
+def test_save_report_writes_exact_generated_content(tmp_path, scan_result: ScanResult):
+    outputs = [
+        ("result.json", JSONReporter(pretty=True)),
+        ("result.md", MarkdownReporter(detailed=True)),
+        ("result.txt", TableReporter(format_style="simple")),
+    ]
+
+    for filename, reporter in outputs:
+        target = tmp_path / filename
+        expected = reporter.generate_report(scan_result)
+        reporter.save_report(scan_result, str(target))
+        assert target.read_text(encoding="utf-8") == expected
+
+
+def test_sarif_reporter_results_always_have_locations(scan_result: ScanResult):
+    reporter = SARIFReporter()
+    output = reporter.generate_report(scan_result)
+    data = json.loads(output)
+    results = data["runs"][0]["results"]
+    assert len(results) > 0
+    for result in results:
+        assert "locations" in result, f"Result for {result['ruleId']} missing locations"
+        assert len(result["locations"]) > 0
+        loc = result["locations"][0]
+        assert "physicalLocation" in loc
+        assert "artifactLocation" in loc["physicalLocation"]
+        assert "uri" in loc["physicalLocation"]["artifactLocation"]
+
+
+def test_sarif_reporter_no_fixes_property(scan_result: ScanResult):
+    reporter = SARIFReporter()
+    output = reporter.generate_report(scan_result)
+    data = json.loads(output)
+    results = data["runs"][0]["results"]
+    for result in results:
+        assert "fixes" not in result
+
+
+def test_sarif_reporter_preserves_per_finding_remediation(scan_result: ScanResult):
+    reporter = SARIFReporter()
+    output = reporter.generate_report(scan_result)
+    data = json.loads(output)
+    results = data["runs"][0]["results"]
+    results_with_remediation = [r for r in results if "remediation" in r.get("properties", {})]
+    assert len(results_with_remediation) > 0
+
+
+def test_sarif_reporter_multi_skill_github_compat(report: Report):
+    reporter = SARIFReporter()
+    output = reporter.generate_report(report)
+    data = json.loads(output)
+    assert data["version"] == "2.1.0"
+    results = data["runs"][0]["results"]
+    for result in results:
+        assert "locations" in result
+        assert "fixes" not in result
+
+
+def _suppressed_result() -> ScanResult:
+    hidden = Finding(
+        id="FIND-004",
+        rule_id="HOMOGLYPH_ATTACK",
+        category=ThreatCategory.OBFUSCATION,
+        severity=Severity.HIGH,
+        title="Mixed-script text",
+        description="Non-ASCII prose read as obfuscation.",
+        file_path="docs/guide.md",
+        analyzer="static",
+        metadata={"suppression": {"rule_id": "HOMOGLYPH_ATTACK", "reason": "Cyrillic prose", "matched_skill": "docs"}},
+    )
+    return ScanResult(
+        skill_name="docs",
+        skill_directory="/tmp/docs",
+        findings=_sample_findings(),
+        suppressed_findings=[hidden],
+        timestamp=datetime(2026, 1, 2, 3, 4, 5),
+    )
+
+
+def test_sarif_reporter_marks_policy_suppressed_findings():
+    data = json.loads(SARIFReporter().generate_report(_suppressed_result()))
+
+    results = data["runs"][0]["results"]
+    suppressed = [r for r in results if "suppressions" in r]
+    assert len(suppressed) == 1
+    assert suppressed[0]["ruleId"] == "HOMOGLYPH_ATTACK"
+    assert suppressed[0]["suppressions"] == [{"kind": "external", "justification": "Cyrillic prose"}]
+
+    # The rule definition must travel with it, or the ruleId dangles.
+    assert "HOMOGLYPH_ATTACK" in {rule["id"] for rule in data["runs"][0]["tool"]["driver"]["rules"]}
+    assert all("suppressions" not in r for r in results if r["ruleId"] != "HOMOGLYPH_ATTACK")
+
+
+def test_sarif_reporter_builds_a_fallback_justification_from_the_selector():
+    result = _suppressed_result()
+    result.suppressed_findings[0].metadata["suppression"]["reason"] = ""
+
+    data = json.loads(SARIFReporter().generate_report(result))
+    suppressed = next(item for item in data["runs"][0]["results"] if "suppressions" in item)
+
+    assert suppressed["suppressions"][0]["justification"] == "Suppressed by scan policy (selector: docs)"
+
+
+def test_sarif_reporter_emits_no_suppressions_by_default(scan_result: ScanResult):
+    data = json.loads(SARIFReporter().generate_report(scan_result))
+    assert all("suppressions" not in result for result in data["runs"][0]["results"])
+
+
+def test_json_reporter_omits_suppressed_findings_when_none(scan_result: ScanResult):
+    data = json.loads(JSONReporter().generate_report(scan_result))
+    assert "suppressed_findings" not in data
+
+
+def test_json_reporter_includes_suppressed_findings_when_present():
+    data = json.loads(JSONReporter().generate_report(_suppressed_result()))
+    assert [f["rule_id"] for f in data["suppressed_findings"]] == ["HOMOGLYPH_ATTACK"]
+    # Suppressed findings must not inflate the reported count.
+    assert data["findings_count"] == len(data["findings"])
+
+
+def test_single_skill_text_reports_include_the_suppressed_count():
+    result = _suppressed_result()
+
+    markdown = MarkdownReporter().generate_report(result)
+    table = TableReporter(format_style="plain").generate_report(result)
+
+    assert "- **Suppressed by policy:** 1" in markdown
+    row = next(line for line in table.splitlines() if line.startswith("Suppressed by Policy"))
+    assert row.split()[-1] == "1"
+
+
+def _result_uris(sarif_output: str) -> list[str]:
+    data = json.loads(sarif_output)
+    return [
+        result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] for result in data["runs"][0]["results"]
+    ]
+
+
+def test_sarif_reporter_uri_includes_skill_subpath_inside_scan_root(tmp_path, monkeypatch):
+    """URIs must be scan-root-relative so GitHub ties results to PR files (issue #107)."""
+    monkeypatch.chdir(tmp_path)
+    skill_dir = tmp_path / "plugins" / "hello-world" / "skills" / "hello-world"
+
+    result = ScanResult(
+        skill_name="hello-world",
+        skill_directory=str(skill_dir),
+        findings=_sample_findings(),
+        scan_duration_seconds=0.1,
+        analyzers_used=["static"],
+        timestamp=datetime(2026, 1, 2, 3, 4, 5),
+    )
+
+    uris = _result_uris(SARIFReporter().generate_report(result))
+
+    prefix = "plugins/hello-world/skills/hello-world"
+    assert f"{prefix}/scripts/decoder.py" in uris
+    assert f"{prefix}/SKILL.md" in uris
+    for uri in uris:
+        assert ".." not in uri
+        assert "\\" not in uri
+
+
+def test_sarif_reporter_uri_in_report_is_prefixed_per_skill(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    first = ScanResult(
+        skill_name="alpha",
+        skill_directory=str(tmp_path / "skills" / "alpha"),
+        findings=[_sample_findings()[2]],  # SKILL.md finding
+        timestamp=datetime(2026, 1, 2, 3, 4, 5),
+    )
+    second = ScanResult(
+        skill_name="beta",
+        skill_directory=str(tmp_path / "skills" / "beta"),
+        findings=[_sample_findings()[2]],
+        timestamp=datetime(2026, 1, 2, 3, 5, 0),
+    )
+
+    aggregate = Report(timestamp=datetime(2026, 1, 2, 3, 6, 0))
+    aggregate.add_scan_result(first)
+    aggregate.add_scan_result(second)
+
+    uris = _result_uris(SARIFReporter().generate_report(aggregate))
+
+    assert "skills/alpha/SKILL.md" in uris
+    assert "skills/beta/SKILL.md" in uris
+
+
+def test_sarif_reporter_uri_unchanged_when_skill_outside_scan_root(scan_result: ScanResult):
+    """Skills outside the working directory keep skill-relative URIs (no ".." segments)."""
+    uris = _result_uris(SARIFReporter().generate_report(scan_result))
+
+    assert "SKILL.md" in uris
+    assert "scripts/decoder.py" in uris
+    for uri in uris:
+        assert ".." not in uri
+
+
+@pytest.mark.parametrize(
+    ("filename", "encoded"),
+    [
+        ("release notes.py", "release%20notes.py"),
+        ("helper#1.py", "helper%231.py"),
+        ("helper?draft.py", "helper%3Fdraft.py"),
+        ("literal%20name.py", "literal%2520name.py"),
+        ("文档.py", "%E6%96%87%E6%A1%A3.py"),
+    ],
+)
+def test_sarif_reporter_encodes_filename_characters(tmp_path, monkeypatch, filename, encoded):
+    monkeypatch.chdir(tmp_path)
+    finding = _sample_findings()[2]
+    finding.file_path = f"scripts/{filename}"
+    result = ScanResult(
+        skill_name="docs",
+        skill_directory=str(tmp_path / "skills" / "docs"),
+        findings=[finding],
+    )
+
+    output = SARIFReporter().generate_report(result)
+    uri = _result_uris(output)[0]
+
+    assert uri == f"skills/docs/scripts/{encoded}"
+    artifact = json.loads(output)["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+    assert artifact["uriBaseId"] == "%SRCROOT%"
+    parsed = urlsplit(uri)
+    assert not parsed.query
+    assert not parsed.fragment
+    assert unquote(parsed.path) == f"skills/docs/scripts/{filename}"
+
+
+@pytest.mark.parametrize("in_skill_directory", [True, False])
+def test_sarif_reporter_preserves_surrogate_escaped_path_bytes(tmp_path, monkeypatch, in_skill_directory):
+    """Undecodable filesystem bytes must not prevent report generation."""
+    monkeypatch.chdir(tmp_path)
+    skill_name = "docs\udcff" if in_skill_directory else "docs"
+    filename = "helper.py" if in_skill_directory else "helper\udcff.py"
+    finding = _sample_findings()[2]
+    finding.file_path = f"scripts/{filename}"
+    result = ScanResult(
+        skill_name=skill_name,
+        skill_directory=str(tmp_path / "skills" / skill_name),
+        findings=[finding],
+    )
+
+    uri = _result_uris(SARIFReporter().generate_report(result))[0]
+
+    assert uri.isascii()
+    parsed = urlsplit(uri)
+    assert not parsed.query
+    assert not parsed.fragment
+    assert unquote_to_bytes(parsed.path) == os.fsencode(f"skills/{skill_name}/scripts/{filename}")
+
+
+@pytest.mark.parametrize("inside_scan_root", [True, False])
+def test_sarif_reporter_encodes_paths_inside_and_outside_scan_root(tmp_path, monkeypatch, inside_scan_root):
+    monkeypatch.chdir(tmp_path)
+    skill_dir = tmp_path / "skills" / "docs #1" if inside_scan_root else tmp_path.parent / "external"
+    finding = _sample_findings()[2]
+    finding.file_path = "scripts/release #1.py"
+    result = ScanResult(skill_name="docs", skill_directory=str(skill_dir), findings=[finding])
+
+    uri = _result_uris(SARIFReporter().generate_report(result))[0]
+
+    prefix = "skills/docs%20%231/" if inside_scan_root else ""
+    assert uri == prefix + "scripts/release%20%231.py"
+
+
+def test_sarif_reporter_encodes_default_manifest_path_in_aggregate_report(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    finding = _sample_findings()[2]
+    finding.file_path = None
+    report = Report()
+    report.add_scan_result(
+        ScanResult(skill_name="docs", skill_directory=str(tmp_path / "skills" / "docs #1"), findings=[finding])
+    )
+
+    assert _result_uris(SARIFReporter().generate_report(report)) == ["skills/docs%20%231/SKILL.md"]
+
+
+def test_sarif_reporter_encodes_cross_skill_finding_path():
+    finding = _sample_findings()[2]
+    finding.file_path = "skills/docs #1/SKILL.md"
+    report = Report(cross_skill_findings=[finding])
+
+    assert _result_uris(SARIFReporter().generate_report(report)) == ["skills/docs%20%231/SKILL.md"]
+
+
+@pytest.mark.parametrize("report_kind", ["single", "aggregate", "cross_skill"])
+def test_sarif_reporter_absolute_path_is_a_file_uri(tmp_path, report_kind):
+    """Absolute artifacts must be file URIs without a relative path base."""
+    finding = _sample_findings()[2]
+    finding.file_path = str(tmp_path / "release #1.py")
+    result = ScanResult(skill_name="docs", skill_directory=str(tmp_path), findings=[finding])
+    if report_kind == "single":
+        data = result
+    elif report_kind == "aggregate":
+        data = Report()
+        data.add_scan_result(result)
+    else:
+        data = Report(cross_skill_findings=[finding])
+
+    output = SARIFReporter().generate_report(data)
+    uri = _result_uris(output)[0]
+
+    assert uri == (tmp_path / "release #1.py").as_uri()
+    assert urlsplit(uri).scheme == "file"
+    assert not urlsplit(uri).fragment
+    artifact = json.loads(output)["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+    assert "uriBaseId" not in artifact
+
+
+def _report_with_suppressions() -> Report:
+    """Two suppressed findings, so the count differs from every other column."""
+    suppressed = _suppressed_result()
+    second = Finding(
+        id="FIND-005",
+        rule_id="ARCHIVE_FILE_DETECTED",
+        category=ThreatCategory.POLICY_VIOLATION,
+        severity=Severity.MEDIUM,
+        title="Archive in skill",
+        description="Archives are expected here.",
+        file_path="fixtures/sample.zip",
+        analyzer="static",
+        metadata={"suppression": {"rule_id": "ARCHIVE_FILE_DETECTED", "reason": "Test fixtures"}},
+    )
+    suppressed.suppressed_findings.append(second)
+
+    aggregate = Report(timestamp=datetime(2026, 1, 2, 3, 6, 0))
+    aggregate.add_scan_result(suppressed)
+    aggregate.add_scan_result(
+        ScanResult(
+            skill_name="clean",
+            skill_directory="/tmp/clean",
+            findings=[],
+            timestamp=datetime(2026, 1, 2, 3, 5, 0),
+        )
+    )
+    return aggregate
+
+
+def test_markdown_multi_skill_reports_suppressed_counts():
+    output = MarkdownReporter().generate_report(_report_with_suppressions())
+    assert "- **Suppressed by policy:** 2" in output
+
+
+def test_table_multi_skill_reports_suppressed_counts():
+    report = _report_with_suppressions()
+    report.add_cross_skill_findings([_sample_findings()[0]])
+    output = TableReporter(format_style="plain").generate_report(report)
+
+    lines = output.splitlines()
+    summary_row = next(line for line in lines if line.startswith("Suppressed by Policy"))
+    assert summary_row.split()[-1] == "2"
+
+    # The fixture suppresses two findings so the count differs from every other
+    # number in the row; asserting the last column then cannot pass by matching
+    # a neighbouring one.
+    docs_row = next(line for line in lines if line.startswith("docs "))
+    clean_row = next(line for line in lines if line.startswith("clean "))
+    cross_skill_row = next(line for line in lines if line.startswith("[cross-skill] "))
+    assert docs_row.split()[-1] == "2"
+    assert clean_row.split()[-1] == "0"
+    assert cross_skill_row.split()[-1] == "0"
+
+
+def test_multi_skill_reports_unchanged_without_suppressions(report: Report):
+    assert "Suppressed" not in MarkdownReporter().generate_report(report)
+    assert "Suppressed" not in TableReporter().generate_report(report)
+
+
+@pytest.mark.parametrize("aggregate", [False, True])
+@pytest.mark.parametrize(
+    ("snippet", "expected_code", "expected_info"),
+    [
+        ('print("```")', 'print("```")', ""),
+        ('```python\nprint("payload")', '```python\nprint("payload")', ""),
+        ('print("payload")\n```', 'print("payload")\n```', ""),
+        ('````\nprint("payload")\n```', '````\nprint("payload")\n```', ""),
+        ('```python\nprint("payload")\n```', 'print("payload")', "python"),
+        ('~~~python\nprint("```")\n~~~', 'print("```")', "python"),
+        ('helper.py:\n```python\nprint("payload")\n```', 'print("payload")', "python"),
+        ('````\nprint("payload")\n`````', 'print("payload")', ""),
+    ],
+)
+def test_markdown_snippet_keeps_following_diagnostics_visible(
+    aggregate: bool, snippet: str, expected_code: str, expected_info: str
+):
+    findings = _sample_findings()
+    findings[0].snippet = snippet
+    findings[0].remediation = "Keep this remediation visible."
+    findings[1].snippet = None
+    result = ScanResult(skill_name="example", skill_directory=".", findings=findings)
+    data: ScanResult | Report = result
+    if aggregate:
+        data = Report()
+        data.add_scan_result(result)
+
+    tokens = MarkdownIt().parse(MarkdownReporter(detailed=True).generate_report(data))
+    code_blocks = [token for token in tokens if token.type == "fence"]
+    assert len(code_blocks) == 1
+    assert code_blocks[0].content == expected_code + "\n"
+    assert code_blocks[0].info == expected_info
+    assert any(
+        token.type == "inline" and token.content == "**Remediation:** Keep this remediation visible."
+        for token in tokens
+    )
+    assert any(token.type == "inline" and findings[1].title in token.content for token in tokens)
+
+
+@pytest.mark.parametrize(
+    ("aggregate", "opening", "closing", "expected_code", "expected_info"),
+    [
+        (True, "  ~~~python", "~~~", '  ~~~python\nprint("payload")\n~~~', ""),
+        (False, "  ~~~python", "~~~", 'print("payload")', "python"),
+        (True, "  ```python", "```", '  ```python\nprint("payload")\n```', ""),
+        (False, "  ```python", "```", 'print("payload")', "python"),
+        (True, "~~~python", "  ~~~", '~~~python\nprint("payload")\n  ~~~', ""),
+        (False, "~~~python", "  ~~~", 'print("payload")', "python"),
+        (True, "```python", "  ```", '```python\nprint("payload")\n  ```', ""),
+        (False, "```python", "  ```", 'print("payload")', "python"),
+        (True, " ~~~python", " ~~~", 'print("payload")', "python"),
+        (True, " ```python", " ```", 'print("payload")', "python"),
+    ],
+)
+def test_markdown_indented_fences_keep_following_diagnostics_visible(
+    aggregate: bool, opening: str, closing: str, expected_code: str, expected_info: str
+):
+    findings = _sample_findings()
+    findings[0].snippet = f'{opening}\nprint("payload")\n{closing}'
+    findings[0].remediation = "Keep this remediation visible."
+    findings[1].snippet = None
+    result = ScanResult(skill_name="example", skill_directory=".", findings=findings)
+    data: ScanResult | Report = result
+    if aggregate:
+        data = Report()
+        data.add_scan_result(result)
+
+    tokens = MarkdownIt().parse(MarkdownReporter(detailed=True).generate_report(data))
+    code_blocks = [token for token in tokens if token.type == "fence"]
+    assert len(code_blocks) == 1
+    assert code_blocks[0].content == expected_code + "\n"
+    assert code_blocks[0].info == expected_info
+    assert any(
+        token.type == "inline" and token.content == "**Remediation:** Keep this remediation visible."
+        for token in tokens
+    )
+    assert any(token.type == "inline" and findings[1].title in token.content for token in tokens)

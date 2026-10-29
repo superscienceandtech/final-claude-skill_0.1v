@@ -1,0 +1,396 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Tests for unpinned-dependency detection in the static analyzer."""
+
+import json
+
+import pytest
+
+from skill_scanner.core.analyzers.static import StaticAnalyzer
+from skill_scanner.core.models import Severity, ThreatCategory
+from skill_scanner.core.semantic import ScanFactProjector
+
+_RULE_ID = "SUPPLY_CHAIN_UNPINNED_DEPENDENCY"
+
+
+@pytest.fixture(scope="module")
+def analyzer() -> StaticAnalyzer:
+    return StaticAnalyzer(use_yara=False)
+
+
+class TestRequirementClassification:
+    """Unit tests for the pure line classifier."""
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "requests==2.31.0",
+            "requests == 2.31.0",
+            "requests[security]==2.31.0",
+            "requests==2.31.0 ; python_version >= '3.10'",
+            "flask===1.0",
+            "  requests==2.31.0  # comment",
+        ],
+    )
+    def test_pinned_not_flagged(self, line):
+        assert StaticAnalyzer._classify_requirement(line) is not None
+        assert StaticAnalyzer._classify_requirement(line)[1] == "pinned"
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "requests",
+            "requests>=2.31.0",
+            "requests>2",
+            "requests~=2.31.0",
+            "requests!=2.0",
+            "requests<3",
+            "requests[security]>=2.31.0",
+            "requests>=2.0 ; python_version < '3.11'",
+        ],
+    )
+    def test_unpinned_flagged(self, line):
+        result = StaticAnalyzer._classify_requirement(line)
+        assert result is not None
+        assert result[1] == "unpinned"
+
+    @pytest.mark.parametrize("line", ["requests==2.*", "django==3.2.*"])
+    def test_wildcard_pins(self, line):
+        result = StaticAnalyzer._classify_requirement(line)
+        assert result is not None
+        assert result[1] == "wildcard"
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "",
+            "   ",
+            "# just a comment",
+            "-r base.txt",
+            "--hash=sha256:abcdef",
+            "-e .",
+            "git+https://github.com/psf/requests.git@main#egg=requests",
+            "requests @ https://example.com/requests-2.31.0.tar.gz",
+        ],
+    )
+    def test_non_requirements_ignored(self, line):
+        assert StaticAnalyzer._classify_requirement(line) is None
+
+
+class TestDependencyPinningFindings:
+    """Integration tests over synthetic skills."""
+
+    def test_unpinned_requirements_flagged(self, analyzer, make_skill):
+        skill = make_skill(
+            {
+                "SKILL.md": "---\nname: dep-test\ndescription: A test skill\n---\n# dep-test\n",
+                "requirements.txt": "requests>=2.31.0\nhttpx>=0.27.0\n",
+            }
+        )
+        findings = analyzer._check_dependency_pinning(skill)
+        assert len(findings) == 2
+        assert all(f.rule_id == _RULE_ID for f in findings)
+        assert all(f.category == ThreatCategory.SUPPLY_CHAIN_ATTACK for f in findings)
+        # Reported, but below the MEDIUM gate: an unpinned dependency is hygiene, and the
+        # supply-chain threat signals are separate rules.
+        assert all(f.severity == Severity.LOW for f in findings)
+
+    def test_pinned_requirements_clean(self, analyzer, make_skill):
+        skill = make_skill(
+            {
+                "SKILL.md": "---\nname: dep-test\ndescription: A test skill\n---\n# dep-test\n",
+                "requirements.txt": "requests==2.31.0\nhttpx==0.27.0\n",
+            }
+        )
+        assert analyzer._check_dependency_pinning(skill) == []
+
+    def test_wildcard_pin_is_low_severity(self, analyzer, make_skill):
+        skill = make_skill(
+            {
+                "SKILL.md": "---\nname: dep-test\ndescription: A test skill\n---\n# dep-test\n",
+                "requirements.txt": "requests==2.*\n",
+            }
+        )
+        findings = analyzer._check_dependency_pinning(skill)
+        assert len(findings) == 1
+        assert findings[0].severity == Severity.LOW
+
+    def test_lockfile_suppresses_findings(self, analyzer, make_skill):
+        skill = make_skill(
+            {
+                "SKILL.md": "---\nname: dep-test\ndescription: A test skill\n---\n# dep-test\n",
+                "requirements.txt": "requests>=2.31.0\n",
+                "uv.lock": "# resolved lockfile\n",
+            }
+        )
+        assert analyzer._check_dependency_pinning(skill) == []
+
+    def test_dev_requirements_scanned(self, analyzer, make_skill):
+        skill = make_skill(
+            {
+                "SKILL.md": "---\nname: dep-test\ndescription: A test skill\n---\n# dep-test\n",
+                "requirements-dev.txt": "pytest>=8\n",
+            }
+        )
+        findings = analyzer._check_dependency_pinning(skill)
+        assert len(findings) == 1
+        assert findings[0].file_path == "requirements-dev.txt"
+
+    def test_manifest_metadata_dependencies(self, analyzer, make_skill):
+        skill = make_skill({"SKILL.md": "---\nname: dep-test\ndescription: A test skill\n---\n# dep-test\n"})
+        skill.manifest.metadata = {"dependencies": ["requests>=2", "flask==2.0.0"]}
+        findings = analyzer._check_dependency_pinning(skill)
+        assert len(findings) == 1
+        assert "requests" in findings[0].description
+        assert findings[0].file_path == "SKILL.md"
+
+        facts = ScanFactProjector().project(skill, findings[0], findings)
+        assert facts.candidate.file_path == "SKILL.md"
+        assert facts.projection.complete is True
+        assert "INVALID_PATH" not in facts.projection.error_codes
+
+
+_SKILL_MD = "---\nname: dep-test\ndescription: A test skill\n---\n# dep-test\n"
+
+
+class TestManifestSourceCoverage:
+    """Dependencies declared outside requirements.txt must also be scanned."""
+
+    def test_pyproject_dependencies_flagged(self, analyzer, make_skill):
+        skill = make_skill(
+            {
+                "SKILL.md": _SKILL_MD,
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "s"\n'
+                    'dependencies = ["requests>=2.0", "flask==2.0.0"]\n'
+                    "\n[project.optional-dependencies]\n"
+                    'dev = ["pytest>=8"]\n'
+                ),
+            }
+        )
+        findings = analyzer._check_dependency_pinning(skill)
+        flagged = {f.description.split("'")[1] for f in findings}
+        assert flagged == {"requests", "pytest"}
+        assert all(f.file_path == "pyproject.toml" for f in findings)
+
+    def test_pyproject_all_pinned_clean(self, analyzer, make_skill):
+        skill = make_skill(
+            {
+                "SKILL.md": _SKILL_MD,
+                "pyproject.toml": '[project]\nname = "s"\ndependencies = ["requests==2.31.0"]\n',
+            }
+        )
+        assert analyzer._check_dependency_pinning(skill) == []
+
+    def test_setup_cfg_install_requires_flagged(self, analyzer, make_skill):
+        skill = make_skill(
+            {
+                "SKILL.md": _SKILL_MD,
+                "setup.cfg": "[options]\ninstall_requires =\n    requests>=2.0\n    flask==2.0.0\n",
+            }
+        )
+        findings = analyzer._check_dependency_pinning(skill)
+        assert len(findings) == 1
+        assert "requests" in findings[0].description
+        assert findings[0].file_path == "setup.cfg"
+
+    def test_setup_py_install_requires_flagged(self, analyzer, make_skill):
+        skill = make_skill(
+            {
+                "SKILL.md": _SKILL_MD,
+                "setup.py": (
+                    "from setuptools import setup\n"
+                    "setup(name='s', install_requires=['requests>=2.0', 'flask==2.0.0'])\n"
+                ),
+            }
+        )
+        findings = analyzer._check_dependency_pinning(skill)
+        assert len(findings) == 1
+        assert "requests" in findings[0].description
+        assert findings[0].file_path == "setup.py"
+
+    def test_setup_py_with_null_bytes_is_ignored(self, analyzer, make_skill):
+        """Malformed untrusted setup.py content must not abort analysis."""
+        skill = make_skill({"setup.py": "setup(name='demo')\x00"})
+
+        findings = analyzer.analyze(skill)
+
+        assert not [finding for finding in findings if finding.file_path == "setup.py"]
+
+    def test_pipfile_packages_flagged(self, analyzer, make_skill):
+        skill = make_skill(
+            {
+                "SKILL.md": _SKILL_MD,
+                "Pipfile": (
+                    "[packages]\n"
+                    'requests = "*"\n'
+                    'flask = "==2.0.0"\n'
+                    'httpx = {version = ">=0.27"}\n'
+                    "\n[dev-packages]\n"
+                    'pytest = "==8.0.0"\n'
+                ),
+            }
+        )
+        findings = analyzer._check_dependency_pinning(skill)
+        flagged = {f.description.split("'")[1] for f in findings}
+        assert flagged == {"requests", "httpx"}
+
+    def test_pipfile_vcs_reference_skipped(self, analyzer, make_skill):
+        skill = make_skill(
+            {
+                "SKILL.md": _SKILL_MD,
+                "Pipfile": '[packages]\nrequests = {git = "https://github.com/psf/requests.git"}\n',
+            }
+        )
+        assert analyzer._check_dependency_pinning(skill) == []
+
+
+def _package_json(**sections) -> str:
+    return json.dumps(sections)
+
+
+class TestNpmDependencyPinning:
+    """package.json ranges are the npm counterpart of an unpinned requirement."""
+
+    def test_unpinned_dependency_flagged(self, analyzer, make_skill):
+        skill = make_skill({"SKILL.md": _SKILL_MD, "package.json": _package_json(dependencies={"lodash": "^4.17.0"})})
+        findings = analyzer._check_dependency_pinning(skill)
+        assert len(findings) == 1
+        assert findings[0].rule_id == _RULE_ID
+        assert findings[0].severity == Severity.LOW
+        assert findings[0].file_path == "package.json"
+        assert "lodash" in findings[0].description
+
+    def test_pinned_dependency_clean(self, analyzer, make_skill):
+        skill = make_skill({"SKILL.md": _SKILL_MD, "package.json": _package_json(dependencies={"lodash": "4.17.15"})})
+        assert analyzer._check_dependency_pinning(skill) == []
+
+    def test_wildcard_dependency_is_low_severity(self, analyzer, make_skill):
+        skill = make_skill({"SKILL.md": _SKILL_MD, "package.json": _package_json(dependencies={"lodash": "4.17.x"})})
+        findings = analyzer._check_dependency_pinning(skill)
+        assert len(findings) == 1
+        assert findings[0].severity == Severity.LOW
+
+    def test_dev_dependencies_scanned(self, analyzer, make_skill):
+        skill = make_skill({"SKILL.md": _SKILL_MD, "package.json": _package_json(devDependencies={"jest": "^29.0.0"})})
+        findings = analyzer._check_dependency_pinning(skill)
+        assert len(findings) == 1
+        assert "jest" in findings[0].description
+
+    def test_peer_dependencies_not_flagged(self, analyzer, make_skill):
+        skill = make_skill(
+            {"SKILL.md": _SKILL_MD, "package.json": _package_json(peerDependencies={"react": "^18.0.0"})}
+        )
+        assert analyzer._check_dependency_pinning(skill) == []
+
+    @pytest.mark.parametrize("spec", ["file:../local", "git+https://example.test/r.git", "owner/repo"])
+    def test_artifact_references_skipped(self, analyzer, make_skill, spec):
+        skill = make_skill({"SKILL.md": _SKILL_MD, "package.json": _package_json(dependencies={"dep": spec})})
+        assert analyzer._check_dependency_pinning(skill) == []
+
+    def test_nested_manifest_reported_at_its_own_path(self, analyzer, make_skill):
+        skill = make_skill(
+            {"SKILL.md": _SKILL_MD, "web/package.json": _package_json(dependencies={"lodash": "^4.17.0"})}
+        )
+        findings = analyzer._check_dependency_pinning(skill)
+        assert [finding.file_path for finding in findings] == ["web/package.json"]
+
+
+class TestLockfileSuppressionIsPerEcosystem:
+    """A lockfile freezes its own ecosystem's ranges, not every ecosystem's."""
+
+    _MIXED = {
+        "SKILL.md": _SKILL_MD,
+        "requirements.txt": "requests>=2.31.0\n",
+        "package.json": json.dumps({"dependencies": {"lodash": "^4.17.0"}}),
+    }
+
+    def test_js_lockfile_suppresses_npm_only(self, analyzer, make_skill):
+        skill = make_skill({**self._MIXED, "yarn.lock": "# resolved\n"})
+        findings = analyzer._check_dependency_pinning(skill)
+        assert [finding.file_path for finding in findings] == ["requirements.txt"]
+
+    def test_python_lockfile_suppresses_python_only(self, analyzer, make_skill):
+        skill = make_skill({**self._MIXED, "poetry.lock": "# resolved\n"})
+        findings = analyzer._check_dependency_pinning(skill)
+        assert [finding.file_path for finding in findings] == ["package.json"]
+
+    def test_both_lockfiles_suppress_both(self, analyzer, make_skill):
+        skill = make_skill({**self._MIXED, "poetry.lock": "# resolved\n", "pnpm-lock.yaml": "lockfileVersion: '6.0'\n"})
+        assert analyzer._check_dependency_pinning(skill) == []
+
+    @pytest.mark.parametrize("lockfile", ["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml"])
+    def test_every_js_lockfile_name_is_recognized(self, analyzer, make_skill, lockfile):
+        skill = make_skill(
+            {
+                "SKILL.md": _SKILL_MD,
+                "package.json": json.dumps({"dependencies": {"lodash": "^4.17.0"}}),
+                lockfile: "{}\n",
+            }
+        )
+        assert analyzer._check_dependency_pinning(skill) == []
+
+
+class TestVendoredManifestsIgnored:
+    """A bundled node_modules tree is not the skill's own declaration."""
+
+    def test_vendored_lockfile_does_not_suppress_own_manifest(self, analyzer, make_skill):
+        # A lockfile belonging to an installed package says nothing about what
+        # this skill declares.
+        skill = make_skill(
+            {
+                "SKILL.md": _SKILL_MD,
+                "package.json": json.dumps({"dependencies": {"chalk": "^5.0.0"}}),
+                "node_modules/vendor/yarn.lock": "# yarn lockfile v1\n",
+            }
+        )
+        findings = analyzer._check_dependency_pinning(skill)
+        assert [finding.file_path for finding in findings] == ["package.json"]
+
+    def test_node_modules_manifests_not_flagged(self, analyzer, make_skill):
+        skill = make_skill(
+            {
+                "SKILL.md": _SKILL_MD,
+                "package.json": json.dumps({"dependencies": {"chalk": "^5.0.0"}}),
+                "node_modules/vendored/package.json": json.dumps({"dependencies": {"vendored-dep": "^1.0.0"}}),
+                "node_modules/a/node_modules/b/package.json": json.dumps({"dependencies": {"deep": "^3.0.0"}}),
+            }
+        )
+        findings = analyzer._check_dependency_pinning(skill)
+        assert [finding.file_path for finding in findings] == ["package.json"]
+
+
+class TestNpmFindingProjectsIntoFacts:
+    """npm findings must project into typed CEL facts, as Python ones do."""
+
+    def test_projection_is_complete(self, analyzer, make_skill):
+        skill = make_skill(
+            {
+                "SKILL.md": _SKILL_MD,
+                "package.json": json.dumps({"dependencies": {"chalk": "^5.0.0", "left": "1.x"}}),
+            }
+        )
+        findings = analyzer._check_dependency_pinning(skill)
+        assert len(findings) == 2
+
+        projector = ScanFactProjector()
+        for finding in findings:
+            facts = projector.project(skill, finding, findings)
+            assert facts.candidate.file_path == "package.json"
+            assert facts.projection.complete is True
+            assert "INVALID_PATH" not in facts.projection.error_codes

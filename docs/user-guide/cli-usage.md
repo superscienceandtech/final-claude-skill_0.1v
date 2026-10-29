@@ -1,0 +1,129 @@
+# CLI Usage
+
+This guide explains practical CLI usage patterns for local scans, CI gates, and policy-driven operation.
+
+> [!TIP]
+> **Most Common Command**
+> ```bash
+> skill-scanner scan ./my-skill
+> ```
+> Runs the default static analyzers and prints a findings summary. Add `--use-behavioral`, `--use-llm`, or `--policy strict` to deepen the analysis.
+
+## Core Commands
+
+- `skill-scanner scan <skill_directory>`
+- `skill-scanner scan-all <skills_directory>`
+- `skill-scanner list-analyzers`
+- `skill-scanner validate-rules`
+- `skill-scanner generate-policy`
+- `skill-scanner configure-policy`
+- `skill-scanner interactive`
+
+## Common Workflows
+
+### Local smoke scan
+
+```bash
+skill-scanner scan ./my-skill
+```
+
+### Recursive CI scan with failure gate
+
+```bash
+skill-scanner scan-all ./skills --recursive --fail-on-findings
+```
+
+### Deep analysis profile
+
+```bash
+skill-scanner scan ./my-skill \
+  --use-behavioral \
+  --use-llm \
+  --enable-meta
+```
+
+### Security reporting (SARIF)
+
+```bash
+skill-scanner scan-all ./skills \
+  --recursive \
+  --format sarif \
+  --output results.sarif \
+  --fail-on-findings
+```
+
+### Policy-based enforcement
+
+```bash
+skill-scanner scan ./my-skill --policy strict
+skill-scanner scan ./my-skill --policy ./my-org-policy.yaml
+```
+
+### CEL decision telemetry
+
+```bash
+# Balanced/default and strict already select shadow mode.
+skill-scanner scan ./my-skill --cel-mode shadow --format json
+
+# Validate bundled and administrator-approved schema-v2 packs first.
+skill-scanner validate-rules --trusted-rule-pack ./org-rules
+skill-scanner scan ./my-skill --trusted-rule-pack ./org-rules --cel-mode shadow
+```
+
+All bundled CEL gates currently use per-rule `rollout: shadow`, so global
+`enforce` mode does not suppress them until individual promotion. ATR remains
+optional with `--rule-packs atr` and is outside the current core + CEL release
+gate.
+
+### Scanning non-standard skill formats
+
+Use `--lenient` to scan skills that don't follow the Codex/Cursor `SKILL.md` convention (e.g. Claude Code `.claude/commands/*.md`):
+
+```bash
+# Scan a directory with .md files but no SKILL.md
+skill-scanner scan .claude/commands/deploy --lenient
+
+# Discover all .md-containing directories under a path
+skill-scanner scan-all .claude/commands --recursive --lenient
+
+# Use a custom metadata file instead of SKILL.md
+skill-scanner scan ./my-skill --skill-file README.md
+```
+
+## Choosing Analyzers
+
+Not sure which flags to use? Pick the row that matches your situation:
+
+| Scenario | Suggested flags |
+|---|---|
+| First test that the CLI works | default analyzers (rules only; add the judge for real use) |
+| Your own skills, pre-commit, CI | `--use-llm --policy low-noise --fail-on-severity high` |
+| Suspicious third-party skill | `--use-llm --policy balanced --fail-on-severity high` (review MEDIUM+) |
+| Little review capacity | `--use-llm --policy quiet --fail-on-severity high` |
+| High-stakes review | `--use-llm --llm-decompose --use-behavioral` |
+| Binary-heavy package | `--use-virustotal` |
+
+## Exit Code Behavior
+
+- `0`: successful command (or no fail condition triggered)
+- `1`: runtime error, or findings at or above the `--fail-on-severity` / `--fail-on-findings` threshold
+- `2`: a policy or configuration error, including a requested analyzer (LLM judge, behavioral or
+  meta) that cannot be built, for example a missing key or provider extra. It never falls back to
+  rules only. The REST API returns HTTP 400 for the same error.
+
+When `--fail-on-findings` is active:
+
+- **`scan`**: exits `1` if `result.is_safe` is false (any CRITICAL or HIGH finding)
+- **`scan-all`**: exits `1` if `critical_count > 0` or `high_count > 0` across all scanned skills
+
+## Detailed Reference
+
+For exhaustive argument tables and full `--help` snapshots, see:
+
+- [CLI Command Reference](../reference/cli-command-reference.md)
+
+## See Also
+
+- [Configuration Reference](../reference/configuration-reference.md) — environment variables for LLM providers, analyzers, and feature toggles
+- [Python SDK](python-sdk.md) — embed scanning directly in Python applications
+- [API Server](api-server.md) — REST API for upload-driven and CI/CD workflows
