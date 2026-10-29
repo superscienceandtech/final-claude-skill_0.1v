@@ -25,5 +25,8 @@ jobs:
       - name: Validate Skill structure
         run: python -B scripts/validate-skill.py --repo-root "$GITHUB_WORKSPACE" --skill-path skills/repository-audit/SKILL.md
 
-      - name: Run implementation tests
-        run: python -B -m unittest discover -s tests/skills/repository-audit -v
+      - name: Run test suite
+        run: python -B -m unittest discover -s tests -v
+
+      - name: Check Markdown links
+        run: python -B scripts/check_markdown_links.py

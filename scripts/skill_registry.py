@@ -1,7 +1,7 @@
-"""Typed, in-memory contracts and read-only discovery for repository Skills.
+"""Typed, in-memory contracts and read-only discovery for native Skill packages.
 
-Discovery reads a deliberately small subset of the repository's observed
-front-matter convention. It does not parse general YAML or execute Skill files.
+Discovery reads metadata only from ``skills/<name>/SKILL.md``. It does not
+parse general YAML or execute Skill files.
 """
 
 from __future__ import annotations
@@ -467,12 +467,13 @@ class SkillRegistry:
 
 
 def discover_skills(repository_root: Path) -> DiscoveryResult:
-    """Discover Markdown Skill candidates under ``skills/`` without executing them.
+    """Discover native Skill packages at ``skills/<name>/SKILL.md``.
 
-    Only a first-line YAML-style front-matter block containing scalar ``name``
-    and ``description`` fields is recognized. The function intentionally does
-    not parse arbitrary YAML; optional registry metadata must be supplied
-    through :meth:`SkillContract.from_mapping`.
+    Other Markdown documents and framework manifests are not native Skill
+    candidates. Only a first-line YAML-style front-matter block containing
+    scalar ``name`` and ``description`` fields is recognized. The function
+    intentionally does not parse arbitrary YAML; optional registry metadata
+    must be supplied through :meth:`SkillContract.from_mapping`.
     """
     root = Path(repository_root).resolve()
     skills_dir = root / "skills"
@@ -501,7 +502,11 @@ def discover_skills(repository_root: Path) -> DiscoveryResult:
         )
         for filename in sorted(filenames):
             source = Path(directory) / filename
-            if source.name.lower() == "readme.md" or source.suffix.lower() != ".md":
+            relative_path = source.relative_to(skills_dir)
+            if (
+                len(relative_path.parts) != 2
+                or source.name != "SKILL.md"
+            ):
                 continue
             if source.is_symlink():
                 issues.append(
@@ -515,17 +520,23 @@ def discover_skills(repository_root: Path) -> DiscoveryResult:
                 with source.open(encoding="utf-8") as markdown:
                     first_line = markdown.readline().rstrip("\r\n")
                 if first_line != "---":
-                    continue
+                    raise SkillMetadataError(
+                        "native Skill entry must begin with front matter."
+                    )
                 metadata = _read_discovery_metadata(source)
-                relative_path = source.relative_to(root)
                 identifier = metadata["name"]
+                directory_name = relative_path.parts[0]
+                if identifier != directory_name:
+                    raise SkillMetadataError(
+                        "Skill metadata name must match its containing directory."
+                    )
                 heading = _read_first_heading(source) or identifier.replace("-", " ").title()
                 contract = SkillContract.from_mapping(
                     {
                         "identifier": identifier,
                         "name": heading,
                         "description": metadata["description"],
-                        "source_path": relative_path,
+                        "source_path": source.relative_to(root),
                     }
                 )
                 contract.resolve_source(root)

@@ -39,7 +39,16 @@ print(implementation.name, implementation.source_path)
 
 Contracts can also be created with `SkillContract.from_mapping(...)` and registered explicitly. Registration resolves the source path beneath the supplied repository root and requires it to be a file. Duplicate identifiers and missing lookups raise explicit errors.
 
-Discovery scans Markdown files below `skills/` without importing or executing them. It recognizes only the observed front-matter `name` and `description` scalar fields; it is not a general YAML parser or the provisional structural validator. Discovery results describe files only and do not authorize Skill execution. Run its tests with `python3 -m unittest discover -s tests -v`.
+`discover_skills` discovers native Skill packages only at
+`skills/<skill-name>/SKILL.md`; the front-matter `name` must match the package
+directory. It reads the scalar `name` and `description` fields without
+importing or executing the file. Other Markdown workflow documents and
+`*.manifest.json` files are not native Skill candidates. This is not a general
+YAML parser or the provisional structural validator. Discovery results
+describe metadata only and do not authorize Skill execution. A canonical entry
+with missing or malformed front matter is reported as a discovery issue rather
+than silently registered or ignored. Run its tests with
+`python3 -m unittest discover -s tests -v`.
 
 ## Declarative Skill manifests
 
@@ -59,7 +68,7 @@ A manifest contains every representable contract declaration:
   "identifier": "text-analysis",
   "name": "Local text analysis",
   "description": "Count characters, words, and lines for supplied text.",
-  "source_path": "skills/implementation/implementation.md",
+  "source_path": "skills/implementation/SKILL.md",
   "version": "0.1",
   "contract_version": "1.2.0",
   "category": "text-processing",
@@ -86,8 +95,9 @@ A manifest contains every representable contract declaration:
 ```
 
 This example is stored as [text-analysis.manifest.json](../../skills/text-analysis.manifest.json)
-and uses the repository's canonical implementation Markdown only as a source
-reference; the manifest does not make that Markdown executable.
+and uses the implementation Skill only as a repository-local source reference.
+The framework manifest is not a native Skill package, does not execute its
+source, and is not automatically loaded by native Skill discovery.
 
 `version` is optional Skill metadata; `contract_version` is the canonical
 numeric `major.minor.patch` contract label and defaults to `"1.0.0"` when
@@ -384,7 +394,7 @@ pipeline.registry.register(SkillContract(
     identifier="text-analysis",
     name="Local text analysis",
     description="Count text characters, words, and lines.",
-    source_path=Path("skills/implementation/implementation.md"),
+    source_path=Path("skills/implementation/SKILL.md"),
     contract_version="1.2.0",
     input_fields=(
         SkillField("text", SkillValueType.STRING),
@@ -436,6 +446,15 @@ means the attempt was rejected before submission, such as an allowlist denial,
 invalid request, or missing executor. The trace contains no inputs, outputs,
 exception text, or tracebacks. Error codes are restricted to known
 tool-framework codes or safe local attempt codes.
+
+`ToolExecutor` accepts outputs from explicitly registered adapters only when
+they are mappings with non-empty string keys. A malformed adapter result
+returns `FAILED` with the safe `runtime_failure` code and no output. This
+contract-shape validation is not a sandbox and does not validate
+application-specific output fields unless the caller adds such validation.
+Adapter identifiers must also satisfy the framework's lowercase identifier
+format; compatibility-check exceptions return a structured runtime failure
+without exposing exception text.
 Invalid invocation data is rejected during `prepare_invocation(...)` (also
 called by `invoke(...)`) with `InvocationValidationError`; it is not
 represented as an execution result because execution has not begun.

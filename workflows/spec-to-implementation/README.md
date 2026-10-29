@@ -8,7 +8,7 @@ It is designed for Member 3 work within the Claude Skills repository and is inte
 
 ## Canonical Skill Reference
 
-This workflow reuses the canonical implementation skill at ../../skills/implementation/implementation.md rather than duplicating its content. The workflow defines the ordered stages and gates; the skill defines the reusable operating rules for implementation work.
+This workflow reuses the implementation Skill at ../../skills/implementation/SKILL.md rather than duplicating its content. The workflow defines the ordered stages and gates; the Skill defines the reusable operating rules for implementation work.
 
 ## Intended use
 

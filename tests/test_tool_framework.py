@@ -1,7 +1,7 @@
 import socket
 import subprocess
 import unittest
-from typing import Any, cast
+from typing import Any, Mapping, cast
 from unittest.mock import patch
 
 from scripts.tool_framework import (
@@ -17,6 +17,7 @@ from scripts.tool_framework import (
     ToolContract,
     ToolContractError,
     ToolExecutionResult,
+    ToolAdapter,
     ToolExecutor,
     ToolInvocationRequest,
     ToolRegistry,
@@ -245,6 +246,27 @@ class ToolInvocationTests(unittest.TestCase):
         self.assertEqual(incompatible_result.status, ToolStatus.ADAPTER_INCOMPATIBLE)
         self.assertIsInstance(incompatible_result.error, IncompatibleAdapterError)
 
+    def test_adapter_registration_rejects_invalid_identifiers(self):
+        class InvalidIdentifierAdapter(ToolAdapter):
+            @property
+            def adapter_id(self) -> str:
+                return "Invalid_ID"
+
+            @property
+            def supported_tool_identifiers(self) -> tuple[str, ...]:
+                return ("local.tool",)
+
+            def supports(self, contract: ToolContract) -> bool:
+                return True
+
+            def execute(
+                self, contract: ToolContract, inputs: Mapping[str, object]
+            ) -> Mapping[str, object]:
+                return {}
+
+        with self.assertRaisesRegex(ToolContractError, "adapter_id"):
+            self.executor.register_adapter(InvalidIdentifierAdapter())
+
     def test_runtime_failure_is_structured_and_does_not_leak_exception_text(self):
         def failing_tool(_inputs):
             raise RuntimeError("secret token must not be exposed")
@@ -270,6 +292,126 @@ class ToolInvocationTests(unittest.TestCase):
         self.assertEqual(result.status, ToolStatus.FAILED)
         self.assertEqual(result.error_code, "runtime_failure")
         self.assertNotIn("secret token", str(result.error))
+
+    def test_malformed_custom_adapter_outputs_are_runtime_failures(self):
+        class MalformedAdapter(ToolAdapter):
+            def __init__(self, output: object) -> None:
+                self.output = output
+
+            @property
+            def adapter_id(self) -> str:
+                return "local.malformed"
+
+            @property
+            def supported_tool_identifiers(self) -> tuple[str, ...]:
+                return ("local.malformed",)
+
+            def supports(self, contract: ToolContract) -> bool:
+                return contract.identifier == "local.malformed"
+
+            def execute(
+                self, contract: ToolContract, inputs: Mapping[str, object]
+            ) -> Mapping[str, object]:
+                return cast(Any, self.output)
+
+        contract = ToolContract(
+            "local.malformed",
+            "Malformed output",
+            "Returns an invalid adapter result.",
+            adapter_id="local.malformed",
+            execution_availability=ExecutionAvailability.AVAILABLE,
+        )
+        self.registry.register(contract)
+
+        for invalid_output in (42, {"": "invalid field name"}):
+            with self.subTest(output=invalid_output):
+                executor = ToolExecutor(self.registry)
+                executor.register_adapter(MalformedAdapter(invalid_output))
+
+                result = executor.invoke(
+                    ToolInvocationRequest("local.malformed", {})
+                )
+
+                self.assertEqual(result.status, ToolStatus.FAILED)
+                self.assertEqual(result.error_code, "runtime_failure")
+                self.assertIsNone(result.output)
+                self.assertIn("ToolRuntimeError", str(result.error))
+
+    def test_adapter_compatibility_check_failure_is_structured(self):
+        class FailingCompatibilityAdapter(ToolAdapter):
+            @property
+            def adapter_id(self) -> str:
+                return "local.compatibility-failure"
+
+            @property
+            def supported_tool_identifiers(self) -> tuple[str, ...]:
+                return ("local.compatibility-failure",)
+
+            def supports(self, contract: ToolContract) -> bool:
+                raise RuntimeError("sensitive compatibility details")
+
+            def execute(
+                self, contract: ToolContract, inputs: Mapping[str, object]
+            ) -> Mapping[str, object]:
+                self.fail("execution must not run after compatibility failure")
+
+        contract = ToolContract(
+            "local.compatibility-failure",
+            "Compatibility failure",
+            "Fails its adapter compatibility check.",
+            adapter_id="local.compatibility-failure",
+            execution_availability=ExecutionAvailability.AVAILABLE,
+        )
+        self.registry.register(contract)
+        executor = ToolExecutor(self.registry)
+        executor.register_adapter(FailingCompatibilityAdapter())
+
+        result = executor.invoke(
+            ToolInvocationRequest("local.compatibility-failure", {})
+        )
+
+        self.assertEqual(result.status, ToolStatus.FAILED)
+        self.assertEqual(result.error_code, "runtime_failure")
+        self.assertIsNone(result.output)
+        self.assertNotIn("sensitive compatibility details", str(result.error))
+
+    def test_adapter_compatibility_check_requires_boolean_result(self):
+        class InvalidCompatibilityAdapter(ToolAdapter):
+            @property
+            def adapter_id(self) -> str:
+                return "local.invalid-compatibility"
+
+            @property
+            def supported_tool_identifiers(self) -> tuple[str, ...]:
+                return ("local.invalid-compatibility",)
+
+            def supports(self, contract: ToolContract) -> bool:
+                return cast(Any, "yes")
+
+            def execute(
+                self, contract: ToolContract, inputs: Mapping[str, object]
+            ) -> Mapping[str, object]:
+                self.fail("execution must not run after invalid compatibility result")
+
+        contract = ToolContract(
+            "local.invalid-compatibility",
+            "Invalid compatibility",
+            "Returns a non-boolean compatibility result.",
+            adapter_id="local.invalid-compatibility",
+            execution_availability=ExecutionAvailability.AVAILABLE,
+        )
+        self.registry.register(contract)
+        executor = ToolExecutor(self.registry)
+        executor.register_adapter(InvalidCompatibilityAdapter())
+
+        result = executor.invoke(
+            ToolInvocationRequest("local.invalid-compatibility", {})
+        )
+
+        self.assertEqual(result.status, ToolStatus.FAILED)
+        self.assertEqual(result.error_code, "runtime_failure")
+        self.assertIsNone(result.output)
+        self.assertIn("ToolRuntimeError", str(result.error))
 
     def test_no_shell_or_network_access_is_needed(self):
         register_text_statistics(self.registry, self.executor)

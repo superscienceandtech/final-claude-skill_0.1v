@@ -9,7 +9,8 @@
 | Host OS / runtime | NOT RUN |
 | Host enforcement evidence reference | NOT VERIFIED |
 | Implementation commit | NOT SELECTED — awaiting Member 2 target confirmation |
-| Owner-approved specification SHA-256 | `b33adec843e3550125aceb2af71c07a3d3c09539f4fa732eb145dd6b3d119afd` (exact revision only) |
+| Owner-approved specification Git-blob SHA-256 | `b33adec843e3550125aceb2af71c07a3d3c09539f4fa732eb145dd6b3d119afd` (exact revision only; verify the target commit's blob) |
+| Current checkout working-tree SHA-256 (2026-10-29) | `50527128247430961E3DF203CE65C5E2013951B5AE2084E1B6AF21D542113B70` (Windows CRLF representation; normalizes to the approved LF blob) |
 | Owner execution authorization | NOT GRANTED |
 | Evaluation package revision | DRAFT — awaiting Member 2 confirmation; not an approval of the specification |
 | Fixture setup revision | NOT RUN |

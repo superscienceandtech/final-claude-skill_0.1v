@@ -36,8 +36,8 @@ This specification is intentionally restricted. It only covers structural valida
 
 The following repository facts are relevant to this specification:
 
-- [skills/implementation/implementation.md](../../skills/implementation/implementation.md) contains the repository's current observed front matter and canonical implementation workflow.
-- [skills/README.md](../../skills/README.md) defines the repository as limited to a canonical implementation workflow and minimal supporting documentation.
+- [skills/implementation/SKILL.md](../../skills/implementation/SKILL.md) contains the repository's current observed front matter and implementation Skill guidance.
+- [skills/README.md](../../skills/README.md) lists the repository's native Skill packages, separate workflow guidance, and framework manifest.
 - [docs/compatibility/README.md](../compatibility/README.md) defines compatibility status labels: `VERIFIED`, `PARTIALLY VERIFIED`, `UNVERIFIED`, and `NOT SUPPORTED`.
 - [providers/README.md](../../providers/README.md) requires provider-specific logic to remain separate from the canonical workflow.
 - [integrations/README.md](../../integrations/README.md) keeps the repository's integration boundary intentionally narrow and provider-neutral.
@@ -47,7 +47,7 @@ The following repository facts are relevant to this specification:
 
 The current in-repository sample uses YAML-style front matter enclosed by `---` delimiters:
 
-- file: [skills/implementation/implementation.md](../../skills/implementation/implementation.md)
+- file: [skills/implementation/SKILL.md](../../skills/implementation/SKILL.md)
 - observed syntax:
 
 ```yaml
@@ -57,13 +57,13 @@ description: "A provider-neutral implementation workflow for safely carrying out
 ---
 ```
 
-This is the only verified repository example of front matter found in the inspected repository. The repository evidence does not establish that strict JSON, constrained YAML, or general YAML is the canonical format across all external consumers.
+The repository also has a `repository-audit` native Skill entry using the same front-matter delimiters and the required `name` and `description` fields. The repository evidence does not establish that strict JSON, constrained YAML, or general YAML is the canonical format across all external consumers.
 
 ### 2.2 Compatibility status
 
 This specification adopts the following provisional position:
 
-- existing repository convention: YAML-style front matter with `---` delimiters is the only verified repository convention
+- existing repository convention: native Skill packages use YAML-style front matter with `---` delimiters and `name`/`description` fields
 - strict JSON is not verified as supported by repository evidence
 - general YAML is not proven canonical for all consumers, but it is compatible with the repository's current observed convention
 - actual external consumer compatibility is still unknown and must remain explicitly marked `UNKNOWN` or `UNVERIFIED` unless authoritative evidence is added
@@ -690,7 +690,7 @@ This draft is acceptable for review only if all of the following are true:
 
 The draft is grounded in the repository evidence that:
 
-- [skills/implementation/implementation.md](../../skills/implementation/implementation.md) contains YAML front matter with `---` delimiters
+- [skills/implementation/SKILL.md](../../skills/implementation/SKILL.md) contains YAML front matter with `---` delimiters
 - [skills/README.md](../../skills/README.md) defines the repo as intentionally narrow and evidence-driven
 - [docs/compatibility/README.md](../compatibility/README.md) defines compatibility status labels
 - [providers/README.md](../../providers/README.md) requires provider-neutral separation

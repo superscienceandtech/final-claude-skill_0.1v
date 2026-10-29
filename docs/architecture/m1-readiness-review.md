@@ -4,6 +4,9 @@
 **Status:** Coordination proposal; not an ADR approval or implementation authorization.  
 **Baseline:** branch `yousuf`, commit `61ae48abf08fce9ba8ddcfcd81bb83a2ca012928`, worktree clean at review time.
 
+**Historical snapshot:** Repository-state findings below describe that baseline
+only; they are not a current inventory or authorization status.
+
 ## Verified repository state
 
 - `yousuf` tracks `origin/yousuf` at `61ae48a`.

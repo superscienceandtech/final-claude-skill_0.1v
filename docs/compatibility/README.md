@@ -13,4 +13,14 @@ Use the following status labels when describing compatibility or verification:
 
 ## Canonical skill compatibility
 
-The implementation skill is designed to be usable across repositories and providers without embedding vendor-specific assumptions. The canonical behavior is the engineering workflow itself, while any provider-specific adapter is considered separate and optional.
+The implementation workflow is designed to be usable across repositories and providers without embedding vendor-specific assumptions. The canonical behavior is the engineering workflow itself, while any provider-specific adapter is considered separate and optional. This design intent is not evidence of compatibility with a specific provider.
+
+## Validator platform support
+
+The repository-audit structural validator requires POSIX directory-descriptor
+opens with `O_NOFOLLOW` and fails closed on non-POSIX systems. Canonical
+Skill-file validation on Windows is unsupported; the validator returns
+`SKILL_PATH_INVALID` before reading the file. The GitHub Actions workflow tests
+on Ubuntu with Python 3.12. Windows test-suite runs do not establish Windows
+validator support, and symlink-dependent tests may be skipped when the host
+does not permit symlink creation.

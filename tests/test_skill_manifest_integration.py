@@ -23,7 +23,11 @@ from scripts.skill_pipeline import (
     SkillExecutionStatus,
     SkillPipeline,
 )
-from scripts.skill_registry import SkillContractVersionError
+from scripts.skill_registry import (
+    SkillContractVersionError,
+    SkillNotFoundError,
+    discover_skills,
+)
 from scripts.skill_workflow import SkillWorkflowAdapter
 from scripts.tool_framework import (
     ExecutionAvailability,
@@ -100,6 +104,54 @@ class SkillManifestIntegrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
+    def test_committed_manifest_example_references_existing_skill_and_tool(
+        self,
+    ) -> None:
+        repository_root = Path(__file__).resolve().parents[1]
+        catalog = load_skill_manifest_catalog(repository_root)
+
+        self.assertEqual(len(catalog.entries), 1)
+        contract = catalog.entries[0].manifest.contract
+        self.assertEqual(contract.identifier, "text-analysis")
+        self.assertEqual(
+            contract.description,
+            "Count characters, words, and lines for supplied text.",
+        )
+        self.assertEqual(
+            contract.source_path,
+            Path("skills/implementation/SKILL.md"),
+        )
+        source = (repository_root / contract.source_path).read_text(encoding="utf-8")
+        self.assertIn("name: implementation", source)
+        self.assertEqual(contract.tools, ("local.text-statistics",))
+        tool_source = (repository_root / "scripts/tool_framework.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('identifier="local.text-statistics"', tool_source)
+        self.assertIn("def text_statistics(", tool_source)
+
+    def test_native_discovery_and_manifest_loading_are_separate(self) -> None:
+        repository_root = Path(__file__).resolve().parents[1]
+        native_skills = discover_skills(repository_root)
+        manifest_catalog = load_skill_manifest_catalog(repository_root)
+        pipeline = SkillPipeline(repository_root)
+        pipeline_discovery = pipeline.discover()
+
+        self.assertEqual(
+            tuple(skill.identifier for skill in native_skills.skills),
+            ("implementation", "repository-audit"),
+        )
+        self.assertEqual(
+            tuple(entry.manifest.contract.identifier for entry in manifest_catalog.entries),
+            ("text-analysis",),
+        )
+        self.assertEqual(
+            pipeline_discovery.registered_identifiers,
+            ("implementation", "repository-audit"),
+        )
+        with self.assertRaises(SkillNotFoundError):
+            pipeline.registry.get("text-analysis")
+
     def _write_manifest(
         self,
         relative_path: str,
@@ -170,6 +222,14 @@ class SkillManifestIntegrationTests(unittest.TestCase):
             with self.assertRaises(SkillManifestError) as json_error:
                 load_skill_manifest(malformed, self.root)
             self.assertEqual(json_error.exception.code, "invalid_manifest_json")
+
+            invalid_version = self._write_manifest(
+                "skills/invalid-version.manifest.json",
+                _manifest("invalid-version", contract_version="01.2.3"),
+            )
+            with self.assertRaises(SkillManifestError) as version_error:
+                load_skill_manifest(invalid_version, self.root)
+            self.assertEqual(version_error.exception.code, "invalid_skill_contract")
         finally:
             outside_manifest.unlink(missing_ok=True)
 

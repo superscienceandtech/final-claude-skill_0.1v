@@ -6,7 +6,7 @@
 
 Before evaluating Skill behavior, all of these conditions must be satisfied:
 
-1. The Project Owner has approved the exact specification revision with SHA-256 `b33adec843e3550125aceb2af71c07a3d3c09539f4fa732eb145dd6b3d119afd`. Evaluation must use the exact approved revision.
+1. The Project Owner approved the exact specification revision with SHA-256 `b33adec843e3550125aceb2af71c07a3d3c09539f4fa732eb145dd6b3d119afd`. Evaluation must use that exact Git-blob revision. On the 2026-10-29 Windows checkout, `core.autocrlf=true` converts its LF bytes to CRLF; the raw working-tree hash differs, while CRLF-to-LF normalization matches the approved blob and Git reports the file clean. Verify the target commit's blob hash before evaluation; do not treat line-ending conversion as a new approval or a content change.
 2. Member 2 confirms evaluator identity, this artifact path, fixture ownership, scope, authoritative expected outcomes, and the exact implementation commit selected for evaluation. The evaluation target is currently `NOT SELECTED`.
 3. The Project Owner separately and explicitly authorizes Skill execution against that exact target commit and scope. Current bounded authorization permits implementation and local validator/unit tests only; it does not authorize Skill execution. Do not rely on historical `OWNER-DECISION-M1-02` for this hash: its implementation-authorization clarification names the earlier `5208d70c…` specification hash.
 4. Member 3 provides reproducible evidence that the execution host enforces the executable/argument allowlist, sanitized environment, working-directory and path restrictions, timeout, output caps, and read-only isolation. The Skill must remain fail-closed until this is demonstrated.

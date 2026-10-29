@@ -366,6 +366,11 @@ class ToolExecutor:
         """Register a trusted adapter instance, never import one by metadata."""
         if not isinstance(adapter, ToolAdapter):
             raise ToolContractError("adapter must implement ToolAdapter.")
+        adapter_id = adapter.adapter_id
+        if not isinstance(adapter_id, str) or not _IDENTIFIER_PATTERN.fullmatch(
+            adapter_id
+        ):
+            raise ToolContractError("adapter_id must be a valid identifier.")
         supported = adapter.supported_tool_identifiers
         if not isinstance(supported, tuple) or any(
             not isinstance(identifier, str)
@@ -375,9 +380,9 @@ class ToolExecutor:
             raise ToolContractError(
                 "adapter supported_tool_identifiers must be a tuple of valid identifiers."
             )
-        if adapter.adapter_id in self._adapters:
-            raise DuplicateAdapterError(f"adapter is already registered: {adapter.adapter_id}")
-        self._adapters[adapter.adapter_id] = adapter
+        if adapter_id in self._adapters:
+            raise DuplicateAdapterError(f"adapter is already registered: {adapter_id}")
+        self._adapters[adapter_id] = adapter
 
     def invoke(self, request: ToolInvocationRequest) -> ToolExecutionResult:
         """Validate and invoke, returning explicit status rather than fake success."""
@@ -414,21 +419,41 @@ class ToolExecutor:
                 ),
             )
         adapter = self._adapters[contract.adapter_id]
-        if (
-            contract.identifier not in adapter.supported_tool_identifiers
-            or not adapter.supports(contract)
-        ):
+        try:
+            is_compatible = (
+                contract.identifier in adapter.supported_tool_identifiers
+                and adapter.supports(contract)
+            )
+            if not isinstance(is_compatible, bool):
+                raise ToolRuntimeError(
+                    "adapter compatibility check returned an invalid result."
+                )
+        except Exception as error:
+            return _failure(
+                request,
+                ToolStatus.FAILED,
+                "runtime_failure",
+                ToolRuntimeError(
+                    f"adapter compatibility check failed ({type(error).__name__})."
+                ),
+            )
+        if not is_compatible:
             return _failure(
                 request,
                 ToolStatus.ADAPTER_INCOMPATIBLE,
                 "adapter_incompatible",
                 IncompatibleAdapterError(
-                    f"adapter '{adapter.adapter_id}' does not support this tool contract."
+                    f"adapter '{contract.adapter_id}' does not support this tool contract."
                 ),
             )
 
         try:
             output = adapter.execute(contract, request.inputs)
+            if not isinstance(output, Mapping) or any(
+                not isinstance(key, str) or not key.strip() for key in output
+            ):
+                raise ToolRuntimeError("adapter returned an invalid output mapping.")
+            output = MappingProxyType(dict(output))
         except IncompatibleAdapterError as error:
             return _failure(
                 request, ToolStatus.ADAPTER_INCOMPATIBLE, "adapter_incompatible", error
@@ -439,7 +464,7 @@ class ToolExecutor:
                 ToolStatus.FAILED,
                 "runtime_failure",
                 ToolRuntimeError(
-                    f"local implementation failed ({type(error).__name__})."
+                    f"adapter execution failed ({type(error).__name__})."
                 ),
             )
         return ToolExecutionResult(

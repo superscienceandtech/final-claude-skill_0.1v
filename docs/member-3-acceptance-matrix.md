@@ -12,7 +12,7 @@ charter, task allocation, or approved role-wide acceptance specification in
 the repository. The [spec-to-implementation workflow](../workflows/spec-to-implementation/README.md)
 is supporting repository guidance: it describes a provider-neutral process
 intended for Member 3 work, but is not a complete role assignment. The
-[implementation Skill](../skills/implementation/implementation.md),
+[implementation Skill](../skills/implementation/SKILL.md),
 [repository README](../README.md), and [Skills index](../skills/README.md)
 are also supporting scope and process documents. The P094–P098 task
 instructions establish milestone-specific scope only. Broader Member 3 duties
@@ -30,7 +30,7 @@ retained in that summary.
 |---|---|---|
 | P094–P098 task instructions supplied in the conversation | Milestone-specific; not a complete role-wide charter | Requirements and exclusions for those named milestones only. |
 | [`workflows/spec-to-implementation/README.md`](../workflows/spec-to-implementation/README.md), especially “Purpose,” “Intended use,” “Entry conditions,” and Stages A–J | Supporting implementation workflow | Provider-neutral requirement intake, inspection, implementation, verification, reporting, and stop-gate guidance. |
-| [`skills/implementation/implementation.md`](../skills/implementation/implementation.md), especially “Boundaries and exclusions” and “Lifecycle” | Supporting canonical Skill guidance | General implementation process and provider-neutral boundaries. |
+| [`skills/implementation/SKILL.md`](../skills/implementation/SKILL.md), especially “Boundaries and exclusions” and “Lifecycle” | Supporting canonical Skill guidance | General implementation process and provider-neutral boundaries. |
 | [`README.md`](../README.md), [`skills/README.md`](../skills/README.md), [`providers/README.md`](../providers/README.md), and [`integrations/README.md`](../integrations/README.md) | Supporting repository boundaries | The repository's documented canonical Skill and provider-neutral integration separation. |
 | [`docs/skills/provisional-structural-validator-spec.md`](./skills/provisional-structural-validator-spec.md), especially its title warning and Section 1 | Provisional / not implementation authorization | No authoritative Member 3 execution-path requirement. |
 | Separate approved Member 3 assignment, charter, task allocation, or role-wide acceptance specification | Not found in the repository search | Role-wide responsibilities and acceptance criteria remain unknown. |

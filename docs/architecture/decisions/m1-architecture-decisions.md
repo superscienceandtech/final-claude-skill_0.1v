@@ -3,6 +3,29 @@
 **Status:** ADR-M1-01 through ADR-M1-06 remain Pending except for the four scoped Owner decisions recorded under ADR-M1-04 below. Those decisions do not approve the specification revision or close ADR-M1-04 as a whole.
 **Scope:** M1 preparation for a minimal `repository-audit` Skill.
 
+## Current checkout specification verification — 2026-10-29
+
+This is a repository-state verification note, not a new Owner decision.
+
+- Current checkout: `main` at `66e348b991e40b7387bd5722d126e08d5b43eafd`.
+- The specification blob at this `HEAD` has SHA-256
+  `b33adec843e3550125aceb2af71c07a3d3c09539f4fa732eb145dd6b3d119afd`,
+  matching the exact revision approved in `OWNER-DECISION-M2.11-01`. The same
+  blob is present at historical commit `288baba0834b`.
+- On this Windows checkout, `core.autocrlf=true` converts the LF blob to CRLF
+  in the working tree. The raw working-tree SHA-256 is
+  `50527128247430961E3DF203CE65C5E2013951B5AE2084E1B6AF21D542113B70`;
+  converting CRLF back to LF yields the approved blob hash above. Git reports
+  the file clean, and the normalized working-tree bytes equal the `HEAD` blob.
+  The raw digest difference is line-ending conversion, not a different
+  committed specification revision.
+- The older `5208D70C…` approval and durable pin remain scoped to their
+  separate historical revision. No approval is inferred across hashes.
+- The durable pin names tag `spec-approval-5208d70c`, but no local tag ref is
+  present in this checkout. Remote tag state was not verified.
+
+This note does not authorize Skill execution or independent evaluation.
+
 Each record separates verified facts from the proposal, approval needed, and consequences/alternatives. A proposal becomes approved only when the team records its decision, approver(s), and date.
 
 ## ADR-M1-01 — Integration base and PR sequence

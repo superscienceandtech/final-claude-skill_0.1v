@@ -39,6 +39,16 @@ class SkillContractTests(unittest.TestCase):
         with self.assertRaisesRegex(SkillMetadataError, "missing required"):
             SkillContract.from_mapping({"identifier": "example"})
 
+    def test_rejects_noncanonical_contract_versions(self):
+        with self.assertRaisesRegex(SkillMetadataError, "major.minor.patch"):
+            SkillContract(
+                identifier="example",
+                name="Example",
+                description="Description",
+                source_path=Path("skills/example/SKILL.md"),
+                contract_version="01.2.3",
+            )
+
     def test_rejects_invalid_identifier_and_field_types(self):
         base = {
             "identifier": "Example_Skill",
@@ -243,12 +253,27 @@ class SkillDiscoveryTests(unittest.TestCase):
             self.assertEqual(result.issues[0].source_path, Path("skills/broken/SKILL.md"))
             self.assertIn("description", result.issues[0].message)
 
+    def test_reports_native_entry_without_front_matter(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            package = root / "skills" / "broken"
+            package.mkdir(parents=True)
+            (package / "SKILL.md").write_text(
+                "# Missing metadata\n", encoding="utf-8"
+            )
+
+            result = discover_skills(root)
+
+            self.assertEqual(result.skills, ())
+            self.assertEqual(len(result.issues), 1)
+            self.assertIn("must begin with front matter", result.issues[0].message)
+
     def test_reports_unclosed_front_matter(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            skill_directory = root / "skills"
-            skill_directory.mkdir()
-            (skill_directory / "broken.md").write_text(
+            skill_directory = root / "skills" / "broken"
+            skill_directory.mkdir(parents=True)
+            (skill_directory / "SKILL.md").write_text(
                 "---\nname: broken\ndescription: Missing end\n", encoding="utf-8"
             )
 
@@ -260,9 +285,9 @@ class SkillDiscoveryTests(unittest.TestCase):
     def test_rejects_non_string_required_scalars(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            skills = root / "skills"
-            skills.mkdir()
-            (skills / "broken.md").write_text(
+            skill_directory = root / "skills" / "broken"
+            skill_directory.mkdir(parents=True)
+            (skill_directory / "SKILL.md").write_text(
                 "---\nname: true\ndescription: 12\n---\n", encoding="utf-8"
             )
 
@@ -289,22 +314,46 @@ class SkillDiscoveryTests(unittest.TestCase):
             self.assertEqual(result.skills, ())
             self.assertEqual(result.issues, ())
 
-    def test_reports_duplicate_identifiers(self):
+    def test_ignores_unrelated_markdown_outside_native_skill_entry_paths(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             skills = root / "skills"
-            skills.mkdir()
-            for filename in ("a.md", "b.md"):
-                (skills / filename).write_text(
-                    "---\nname: duplicate\ndescription: Same id\n---\n",
-                    encoding="utf-8",
-                )
+            workflow = skills / "workflows"
+            workflow.mkdir(parents=True)
+            (workflow / "implementation.md").write_text(
+                "---\nname: implementation\ndescription: Workflow guidance\n---\n",
+                encoding="utf-8",
+            )
+            (skills / "notes.md").write_text(
+                "---\ninvalid metadata\n", encoding="utf-8"
+            )
+            package = skills / "valid"
+            package.mkdir()
+            (package / "SKILL.md").write_text(
+                "---\nname: valid\ndescription: Native Skill\n---\n",
+                encoding="utf-8",
+            )
 
             result = discover_skills(root)
 
-            self.assertEqual([skill.identifier for skill in result.skills], ["duplicate"])
+            self.assertEqual([skill.identifier for skill in result.skills], ["valid"])
+            self.assertEqual(result.issues, ())
+
+    def test_rejects_skill_name_that_does_not_match_package_directory(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            package = root / "skills" / "folder-name"
+            package.mkdir(parents=True)
+            (package / "SKILL.md").write_text(
+                "---\nname: other-name\ndescription: Mismatched package\n---\n",
+                encoding="utf-8",
+            )
+
+            result = discover_skills(root)
+
+            self.assertEqual(result.skills, ())
             self.assertEqual(len(result.issues), 1)
-            self.assertIn("duplicate Skill identifier", result.issues[0].message)
+            self.assertIn("match its containing directory", result.issues[0].message)
 
     def test_rejects_skills_directory_symlink_outside_repository(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -312,7 +361,9 @@ class SkillDiscoveryTests(unittest.TestCase):
             root.mkdir()
             outside = Path(temporary_directory) / "outside"
             outside.mkdir()
-            (outside / "skill.md").write_text(
+            package = outside / "outside"
+            package.mkdir()
+            (package / "SKILL.md").write_text(
                 "---\nname: outside\ndescription: Outside\n---\n",
                 encoding="utf-8",
             )

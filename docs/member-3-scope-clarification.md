@@ -16,7 +16,7 @@ assignment or supplies its authoritative source.
   describes a provider-neutral implementation and verification workflow
   intended for Member 3 work. It is supporting process guidance, not a complete
   role assignment.
-- [`skills/implementation/implementation.md`](../skills/implementation/implementation.md),
+- [`skills/implementation/SKILL.md`](../skills/implementation/SKILL.md),
   [`README.md`](../README.md), and [`skills/README.md`](../skills/README.md)
   describe repository and implementation boundaries, not a complete Member 3
   task allocation.

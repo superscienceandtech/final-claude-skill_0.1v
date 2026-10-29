@@ -9,6 +9,13 @@
 **Specification approval:** APPROVED for the exact hash above only. This does not approve the evaluation package or authorize Skill execution.
 **Skill execution authorization:** NOT GRANTED; OWNER-DECISION-M1-02 does not authorize Skill execution.
 
+The approved hash identifies the LF Git blob. In the 2026-10-29 Windows
+checkout, `core.autocrlf=true` makes the raw working-tree file hash
+`50527128247430961E3DF203CE65C5E2013951B5AE2084E1B6AF21D542113B70`;
+normalizing CRLF to LF reproduces the approved blob hash. Git reports the
+tracked file clean. This line-ending conversion does not identify a different
+committed specification revision.
+
 This package is a handoff draft, not independent evidence or Member 2 acceptance. It does not authorize execution through an unrestricted shell. See [the evaluation plan](EVALUATION_PLAN.md), [rubric](RUBRIC.md), and [evidence template](EVIDENCE_TEMPLATE.md).
 
 Member 2 should confirm or amend the evaluator identity, artifact path, scope, fixture approach, and expected outcomes before recording evaluation results. Never fill a skipped scenario as PASS.
