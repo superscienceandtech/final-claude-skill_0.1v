@@ -1,13 +1,10 @@
----
-name: implementation
-description: "A provider-neutral implementation workflow for safely carrying out software engineering tasks from understanding through verification."
----
+# Implementation Workflow Guidance
 
-# Canonical Implementation Skill
+This document provides supporting, provider-neutral implementation workflow guidance. It is not a canonical Skill definition: canonical Skills use the `SKILL.md` layout described in the [Skills index](../README.md). For current bounded repository implementation practices, see [repository-implementation](../repository-implementation/SKILL.md); for planning, see [implementation-planning](../implementation-planning/SKILL.md) and [engineering-implementation-planning](../engineering-implementation-planning/SKILL.md).
 
 ## Identity and purpose
 
-This skill provides a repeatable engineering workflow for safely turning a user objective into a verified, reviewable change.
+This guidance describes a repeatable engineering workflow for turning a user objective into a reviewable change with evidence appropriate to its scope.
 
 It is designed to help with:
 
@@ -18,9 +15,9 @@ It is designed to help with:
 
 It is explicitly not a generic prompt template. It is an engineering workflow that requires inspection, specification, implementation, testing, debugging, verification, and reporting.
 
-### Activation conditions
+### When this guidance is useful
 
-Use this skill when the objective is to:
+Use this guidance when the objective is to:
 
 - implement or modify code in a repository
 - determine missing requirements before writing code
@@ -29,7 +26,7 @@ Use this skill when the objective is to:
 
 ### Boundaries and exclusions
 
-This skill does not:
+This guidance does not:
 
 - invent architecture contracts for other team members without repository evidence
 - guess that a dependency, framework, or provider exists without checking the repository
@@ -39,7 +36,7 @@ This skill does not:
 
 ## Lifecycle
 
-The canonical lifecycle is:
+The workflow lifecycle is:
 
 1. Understand
 2. Inspect
@@ -52,7 +49,7 @@ The canonical lifecycle is:
 9. Report
 10. Stop
 
-The skill must treat these as stages, not as decorative headings. The workflow is complete only when verification evidence exists and the final report is explicit about remaining risk.
+Treat these as stages, not as decorative headings. Report completion only with evidence appropriate to the task and explicit disclosure of remaining risk.
 
 ## Required operating behavior
 
@@ -180,7 +177,7 @@ When safe progress is impossible, report the blocker clearly and stop the affect
 
 ## Provider neutrality requirements
 
-This canonical implementation skill remains independent of any specific AI coding provider.
+This implementation guidance remains independent of any specific AI coding provider.
 
 It must not assume or require:
 
@@ -190,7 +187,7 @@ It must not assume or require:
 - Codex-specific commands
 - any undocumented provider-only contract
 
-Provider-specific adapters, if any, must be separate from the canonical skill itself.
+Provider-specific adapters, if any, must remain separate from provider-neutral guidance.
 
 Compatibility status should be reported as:
 

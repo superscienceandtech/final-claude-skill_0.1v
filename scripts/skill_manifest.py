@@ -121,6 +121,14 @@ class SkillManifestCatalogEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class SkillManifestResolution:
+    """A discovered Skill paired with its manifest entry, when one exists."""
+
+    skill: SkillContract
+    manifest_entry: SkillManifestCatalogEntry | None
+
+
+@dataclass(frozen=True, slots=True)
 class SkillManifestCatalogIssue:
     """A safe, deterministic description of one catalog validation conflict."""
 
@@ -258,6 +266,38 @@ def load_skill_manifest_catalog(repository_root: Path) -> SkillManifestCatalog:
     if issues:
         raise SkillManifestCatalogError(tuple(issues))
     return SkillManifestCatalog(root, tuple(entries))
+
+
+def resolve_skill_manifest(
+    skill: SkillContract, catalog: SkillManifestCatalog
+) -> SkillManifestResolution:
+    """Resolve an optional manifest for a discovered Skill by canonical identity.
+
+    A missing manifest is a valid resolution outcome. The Skill source path and
+    manifest implementation source path remain separate and are not compared.
+    Catalog validation errors must be handled by the caller before resolution.
+    """
+    if not isinstance(skill, SkillContract):
+        raise SkillManifestError(
+            "skill must be a SkillContract.", code="invalid_resolution_input"
+        )
+    if not isinstance(catalog, SkillManifestCatalog):
+        raise SkillManifestError(
+            "catalog must be a validated SkillManifestCatalog.",
+            code="invalid_resolution_input",
+            skill_identifier=skill.identifier,
+        )
+
+    skill.resolve_source(catalog.repository_root)
+    manifest_entry = next(
+        (
+            entry
+            for entry in catalog.entries
+            if entry.manifest.contract.identifier == skill.identifier
+        ),
+        None,
+    )
+    return SkillManifestResolution(skill, manifest_entry)
 
 
 def register_skill_manifest_catalog(

@@ -59,7 +59,7 @@ A manifest contains every representable contract declaration:
   "identifier": "text-analysis",
   "name": "Local text analysis",
   "description": "Count characters, words, and lines for supplied text.",
-  "source_path": "skills/implementation/implementation.md",
+  "source_path": "scripts/tool_framework.py",
   "version": "0.1",
   "contract_version": "1.2.0",
   "category": "text-processing",
@@ -67,13 +67,7 @@ A manifest contains every representable contract declaration:
   "inputs": [],
   "outputs": [],
   "input_fields": [
-    {"name": "text", "value_type": "string", "required": true},
-    {
-      "name": "locale",
-      "value_type": "string",
-      "required": false,
-      "nullable": true
-    }
+    {"name": "text", "value_type": "string", "required": true}
   ],
   "output_fields": [
     {"name": "statistics", "value_type": "object", "required": true}
@@ -86,8 +80,8 @@ A manifest contains every representable contract declaration:
 ```
 
 This example is stored as [text-analysis.manifest.json](../../skills/text-analysis.manifest.json)
-and uses the repository's canonical implementation Markdown only as a source
-reference; the manifest does not make that Markdown executable.
+and maps to the text-statistics implementation source; it does not identify
+the canonical Skill instructions or make the implementation available by itself.
 
 `version` is optional Skill metadata; `contract_version` is the canonical
 numeric `major.minor.patch` contract label and defaults to `"1.0.0"` when
@@ -373,6 +367,7 @@ def analyze_text(context):
     )
     if tool_result.status is not ToolStatus.SUCCEEDED or tool_result.output is None:
         raise RuntimeError("text statistics tool did not succeed")
+    # This application adapter explicitly wraps the direct count object.
     return {"statistics": dict(tool_result.output)}
 
 pipeline = SkillPipeline(
@@ -384,11 +379,10 @@ pipeline.registry.register(SkillContract(
     identifier="text-analysis",
     name="Local text analysis",
     description="Count text characters, words, and lines.",
-    source_path=Path("skills/implementation/implementation.md"),
+    source_path=Path("skills/text-analysis/SKILL.md"),
     contract_version="1.2.0",
     input_fields=(
         SkillField("text", SkillValueType.STRING),
-        SkillField("locale", SkillValueType.STRING, required=False, nullable=True),
     ),
     output_fields=(
         SkillField("statistics", SkillValueType.OBJECT),
@@ -671,6 +665,16 @@ else:
     print(result.status.value, result.error_code, result.error)
 PY
 ```
+
+### Local text-statistics contract
+
+The `local.text-statistics` tool accepts one required string input, `text`, and returns an object with three integer fields: `characters`, `words`, and `lines`. The corresponding `text-analysis` manifest declares the same required input and a `statistics` object output.
+
+- `characters` is Python `len(text)`, counting Unicode code points rather than encoded bytes or user-perceived grapheme clusters.
+- `words` is `len(text.split())`, counting whitespace-separated items rather than performing linguistic tokenization.
+- `lines` is `text.count("\n") + 1` for non-empty text and `0` for empty text. A trailing newline therefore adds a final counted line.
+
+The tool has no `locale` input and does not provide locale-aware tokenization, semantic or sentiment analysis, or language detection. The implementation is defined by `text_statistics`; `register_text_statistics` adds the contract and adapter to the local tool framework when explicitly called by application code. This repository implementation and local registration do not establish availability or successful invocation through any particular provider or execution environment.
 
 Adapters are trusted in-process objects supplied directly by the application; adapter identifiers in tool metadata never trigger dynamic imports. The built-in text-statistics implementation is local, deterministic, read-only, and requires no credentials or network. No external provider adapter or general-purpose execution sandbox is included. Run framework and repository tests with `python3 -m unittest discover -s tests -v`.
 

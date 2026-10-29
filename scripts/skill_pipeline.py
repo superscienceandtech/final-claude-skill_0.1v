@@ -19,9 +19,15 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping
 
+from scripts.skill_manifest import (
+    SkillManifestResolution,
+    load_skill_manifest_catalog,
+    resolve_skill_manifest,
+)
 from scripts.skill_registry import (
     DEFAULT_CONTRACT_VERSION,
     DiscoveryIssue,
+    DiscoveryResult,
     DuplicateSkillError,
     SkillContract,
     SkillContractVersionError,
@@ -93,6 +99,14 @@ class PipelineDiscoveryResult:
     discovered: tuple[SkillContract, ...]
     registered_identifiers: tuple[str, ...]
     issues: tuple[DiscoveryIssue, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineManifestResolutionResult:
+    """Canonical Skill discovery and separate optional manifest resolutions."""
+
+    discovery: DiscoveryResult
+    resolutions: tuple[SkillManifestResolution, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,6 +385,19 @@ class SkillPipeline:
             registered_identifiers=tuple(registered),
             issues=tuple(sorted(issues, key=lambda issue: (str(issue.source_path), issue.message))),
         )
+
+    def discover_with_manifest_metadata(self) -> PipelineManifestResolutionResult:
+        """Discover canonical Skills and resolve their optional manifest metadata.
+
+        This method does not register either representation. Manifest catalog
+        validation failures propagate as ``SkillManifestCatalogError``.
+        """
+        discovery = discover_skills(self.repository_root)
+        catalog = load_skill_manifest_catalog(self.repository_root)
+        resolutions = tuple(
+            resolve_skill_manifest(skill, catalog) for skill in discovery.skills
+        )
+        return PipelineManifestResolutionResult(discovery, resolutions)
 
     def search(self, query: str) -> tuple[SkillContract, ...]:
         """Find Skills containing ``query`` in identifier, name, description, or tags."""
