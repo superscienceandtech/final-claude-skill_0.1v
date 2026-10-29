@@ -1,8 +1,9 @@
 # M1 Repository-Audit Assurance Review
 
-**Owner:** Member 1 — Architecture & Integration Lead
-**Status:** Review proposal; no ADR approval, implementation authorization, or evaluation result is implied.
+**Historical owner label:** Member 1 — Architecture & Integration Lead
+**Status:** Historical assurance proposal for the protected repository-audit Skill; it does not imply implementation authorization or an evaluation result.
 **Related documents:** `decisions/m1-architecture-decisions.md`, `repository-audit-skill-spec.md`, `team-file-ownership.md`, `m1-readiness-review.md`.
+**Role context:** Member labels and review assignments are historical proposal context, not current assignments. The Project Owner is the sole current decision-maker. This assurance review concerns the protected repository-audit Skill and remains a proposal; it is not execution or evaluation evidence and does not authorize either.
 
 ## Scope and evidence labels
 
@@ -13,7 +14,7 @@ This review uses four labels:
 - **Open decision** — policy choice requiring a recorded team decision.
 - **Acceptance criterion** — observable evidence needed to pass review; not a claim that a check ran.
 
-The canonical Skill, validator, implementation tests, and draft evaluation plan/rubric/evidence template are present in this checkout. The evaluation package remains unconfirmed and no independent evaluation result is recorded here. ADR-M1-01 through ADR-M1-06 remain PENDING. This review does not establish execution-host enforcement.
+The canonical Skill, validator, implementation tests, and draft evaluation plan/rubric/evidence template are present in this checkout. The evaluation package remains unconfirmed and no independent evaluation result is recorded here. This assurance review is a snapshot of its own proposal status; subsequent scoped Owner decisions accepted the solo ownership/lifecycle model and ordinary native Skill/validation conventions. Protected repository-audit technical decisions and execution-host enforcement remain open.
 
 ## Requirements-to-acceptance traceability
 
@@ -95,7 +96,7 @@ This is a documentation-only review procedure for a future implementation. It do
 
 ### Reusable documentation-only fixture definitions
 
-These definitions are review examples, not Member 2 evaluation artifacts, runnable tests, or final expected outputs. They should be transferred into the team-approved evaluation package only by its confirmed owner.
+These definitions are review examples, not independent evaluation artifacts, runnable tests, or final expected outputs. They may be used in a future evaluation package only with clear provenance and separate authorization; they are not independent evidence.
 
 | Fixture ID | Isolated setup and request | Proposed invariant to inspect | Contract-dependent result left open |
 |---|---|---|---|
@@ -112,7 +113,10 @@ No fixture above has been created or executed. Exact expected outputs remain pen
 
 ## Member 2 independent evaluation evidence checklist
 
-This is an evidence checklist, not replacement evaluation content. Member 2 owns and supplies the evaluation artifacts.
+This is an evidence checklist, not replacement evaluation content. Under the
+current solo operating model, the Project Owner owns repository artifacts;
+any independent evaluator must be separately identified and must supply
+their own evaluation evidence.
 
 - [ ] Identify Skill source revision/hash, metadata version, evaluator, date, environment, and exact invocation.
 - [ ] Provide isolated fixture manifest with full commit IDs, refs, fixed commit metadata, contents, permissions, and platform notes.
@@ -128,6 +132,14 @@ This is an evidence checklist, not replacement evaluation content. Member 2 owns
 
 ## Decision and authorization status
 
-This review changes no ADR status. ADR-M1-01 through ADR-M1-06 remain **PENDING**. The tabled defaults are proposals only. The canonical Skill, validator, and Member 2 evaluation artifacts remain outside this document's scope and ownership.
+This review itself changes no ADR status. Current ADR status is maintained in
+the [M1 architecture decision record](./decisions/m1-architecture-decisions.md):
+solo ownership/lifecycle decisions are accepted within their stated scope,
+while integration, protected repository-audit contract details, independent
+evaluation, and execution-host enforcement remain open. The tabled defaults
+are proposals only.
 
-**Implementation authorization:** NOT AUTHORIZED until the team records the required ADR decisions and an explicit bounded M1 authorization.
+**Implementation authorization:** This review grants none. Consult the current
+scoped Owner authorizations; protected Skill/validator execution and
+evaluation remain gated unless their specific required authorization is
+established.

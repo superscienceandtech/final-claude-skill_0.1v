@@ -4,6 +4,27 @@ Native Skill packages use `skills/<skill-name>/SKILL.md`. The framework
 registry's `discover_skills` API follows this convention; other Markdown
 documents are not native Skill candidates.
 
+## Claude Code integration
+
+The canonical Skill files remain in `skills/`. The repository root is also a
+Claude Code plugin, declared by `.claude-plugin/plugin.json`. Its default
+plugin `skills/` component directory points at the same
+`skills/<skill-name>/SKILL.md` files without copies, symlinks, or a second
+source of truth, following the [documented plugin component
+layout](https://code.claude.com/docs/en/plugins/components#skills).
+
+From the repository root, load the plugin for a Claude Code session with:
+
+    claude --plugin-dir .
+
+The documented command form when loaded is
+`/claude-skills-library:implementation`. This repository currently documents
+the local plugin-development load path; it does not define a marketplace or
+permanent installation. The configuration and registry tests do not establish
+runtime discovery, which must be checked in Claude Code itself. Loading a Skill
+does not grant authorization to run its instructions or any protected
+validator.
+
 ## Native Skill packages
 
 - [repository-audit](./repository-audit/SKILL.md) — bounded, read-only repository metadata audit instructions. The instructions are not an execution sandbox.

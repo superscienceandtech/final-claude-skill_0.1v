@@ -1,13 +1,16 @@
 # M1 Architecture Decision Review
 
-**Status:** ADR-M1-01 through ADR-M1-06 remain Pending except for the four scoped Owner decisions recorded under ADR-M1-04 below. Those decisions do not approve the specification revision or close ADR-M1-04 as a whole.
+**Status:** The ADRs have distinct scoped statuses as recorded below. This log does not authorize protected execution, independent evaluation, integration, or release unless a specific decision says so.
 **Scope:** M1 preparation for a minimal `repository-audit` Skill.
 
-## Current checkout specification verification — 2026-10-29
+## Historical checkout specification verification — 2026-10-29
 
-This is a repository-state verification note, not a new Owner decision.
+This is a repository-state verification note, not a new Owner decision. It
+records the checkout observed at that time; it is not a statement of the
+current checkout.
 
-- Current checkout: `main` at `66e348b991e40b7387bd5722d126e08d5b43eafd`.
+- Checkout observed for this verification: `main` at
+  `66e348b991e40b7387bd5722d126e08d5b43eafd`.
 - The specification blob at this `HEAD` has SHA-256
   `b33adec843e3550125aceb2af71c07a3d3c09539f4fa732eb145dd6b3d119afd`,
   matching the exact revision approved in `OWNER-DECISION-M2.11-01`. The same
@@ -26,34 +29,78 @@ This is a repository-state verification note, not a new Owner decision.
 
 This note does not authorize Skill execution or independent evaluation.
 
-Each record separates verified facts from the proposal, approval needed, and consequences/alternatives. A proposal becomes approved only when the team records its decision, approver(s), and date.
+Each record separates verified facts from the proposal, approval needed, and consequences/alternatives. Member and team-review language below is historical proposal context, not a current assignment. For decisions within the sole Project Owner's authority, the recommended replacement is an explicit dated Owner decision; separately mandated security, evaluation, legal, or external approvals remain in force. A proposal becomes accepted only when the applicable authority and decision are recorded.
+
+## Project Owner operating-model decision — OWNER-DECISION-M2.29-01
+
+- **Decision status:** **ACCEPTED BY PROJECT OWNER**, 2026-10-29.
+- **Decision-maker:** Sole Project Owner and maintainer, as explicitly confirmed by the Owner.
+- **Decision:** For ordinary repository-local engineering within the Owner's
+  stated authorization, the Project Owner sets direction, scope, and
+  authorization and makes final acceptance and release decisions. Claude
+  Code may implement, inspect, test, debug, and self-review only within the
+  available capabilities and the authorized scope. Self-review must be
+  labeled self-review. Automated tests/static checks are evidence, not
+  independent human approval. Independent verification may be claimed only
+  when a genuinely separate reviewer performs it. Release approval is not
+  implied and requires an explicit Owner decision.
+- **Governance effect:** For repository-local decisions within the Owner's
+  authority, this decision replaces obsolete requirements for team consensus
+  or a fictional second project owner with a recorded, scoped Project Owner
+  decision. It does not waive independent-review criteria, security controls,
+  external approvals, legal or organizational constraints, or separate
+  authorization required by protected workflows.
+- **Limits:** This is an operating-model decision, not blanket authorization.
+  It does not authorize repository-audit Skill/validator execution,
+  evaluation, CI, integration, publication, or release. Existing
+  specification approvals remain exact-revision only. Pending technical ADRs
+  still require their own evidence and decisions.
+- **Provenance:** Explicit Project Owner confirmation in the
+  `MASTER PROMPT 1 + 2 — OWNER DECISION AND FINAL IMPLEMENTATION PASS`
+  message on 2026-10-29.
+
+## ADR-M1 decision status reconciliation — 2026-10-29
+
+| ADR | Status | Decision/evidence boundary |
+|---|---|---|
+| ADR-M1-01 — integration base and sequence | **PENDING; non-blocking for local work** | Current work remains on `main`; no merge, rebase, or publication was authorized. The canonical integration base and reconciliation sequence remain undecided. |
+| ADR-M1-02 — canonical Skill source and format | **ACCEPTED for current native Skill layout; protected Skill details remain gated** | The repository uses `skills/<name>/SKILL.md`, and the registry discovers that layout. Keep one canonical source and treat provider manifests as integration metadata, not duplicate Skill authority. This does not approve any different metadata schema or the protected repository-audit specification revision. |
+| ADR-M1-03 — validation strategy | **ACCEPTED for ordinary repository-local validation** | Use existing dependency-free Python `unittest` and named repository scripts; use the bounded validation adapter only for its fixed operations. Validator execution/evaluation for protected repository-audit remains subject to its separate gates. |
+| ADR-M1-04 — repository-audit Skill and safety contract | **PARTIAL; protected execution NOT AUTHORIZED** | Exact specification revision and selected policy decisions have their own records. Implementation, host-enforcement evidence, evaluation, and release remain separate and unverified or unauthorized as recorded. |
+| ADR-M1-05 — ownership and evidence | **ACCEPTED for current solo-maintainer operating model** | The Project Owner is accountable for repository decisions, scope, authorization, and evidence. Claude Code is an instructed implementer only. Separate reviewer identity is required for independent-review claims; this does not assert such a reviewer exists. |
+| ADR-M1-06 — lifecycle and release authority | **ACCEPTED for current solo-maintainer operating model** | Implementation, automated evidence, independent evaluation, Owner acceptance, authorization, and release are separate states. The Project Owner is the final acceptance/release authority for this repository. No release is approved by this decision. |
+
+These scoped decisions are not blanket ARC acceptance and do not authorize
+protected actions. Remaining implementation, security, independent
+verification, and exact-scope decisions are tracked in the M2 prerequisite
+status.
 
 ## ADR-M1-01 — Integration base and PR sequence
 
 - **Verified fact (2026-10-13):** `yousuf` is at `a8f1902c150b55c7193d97555ac44ce18384cc89` and tracks `origin/yousuf` at `d0ffd15249c892a1742b32f7f8b4f948eae1ddea` (eight commits ahead, none behind). Local `main` is at `2efcdf2d9753bfc76ca5f440efe9e205cc2efe80`; `origin/main` is at `cca20097a802823d7625bb23d7bcd12bb398de17` (each is one commit ahead of the other after shared commit `6db6634e044ba763899d45f0d28927ec8a82e60a`). `yousuf` and local `main` share ancestor `d4728565e72c964fbd1e6a3901d732c6099e77d8`; `main` has two unique commits and `yousuf` has twelve. Before the remote refresh, `origin/srijon` and `origin/sonjoy` pointed to that ancestor; refreshed tips are `91eb2743299cceff2b8eca43450f4d7e6afa7849` and `979906879ba9540ecf0be723e916864c58a71c97`, respectively.
-- **Proposed decision:** Do not choose an integration base in this record. Require the team to select one explicitly. Afterward, review M0/M1 docs in a documentation PR; then Skill source/validator and Member 2 fixtures in separate scoped PRs, each against the agreed base.
-- **Team approval required:** Yes; integration base and reconciliation approach.
+- **Proposed decision:** Do not choose an integration base in this record. The Project Owner must select one explicitly before integration. Afterward, review M0/M1 docs in a documentation PR; keep source changes, any independent evaluation artifacts, and approval evidence in separately scoped changes.
+- **Owner decision required:** Yes; integration base and reconciliation approach.
 - **Consequences / alternatives:** Avoids silently importing divergent history. Alternatives are choosing `main` or another agreed branch and planning reviewed reconciliation. No merge or history change is authorized here.
 
 ## ADR-M1-02 — Canonical Skill source and format
 
 - **Verified fact:** No Skill format, Skill artifact, or validator exists on the audited branch.
-- **Proposed decision:** Keep one provider-neutral canonical source at `skills/repository-audit/SKILL.md`, using Markdown instructions plus YAML front matter for stable metadata. Later provider-specific packaging, if needed, is generated/adapted from this source and is not independently authoritative. Proposed metadata: `name`, `description`, `version`; team must approve exact types and schema.
-- **Team approval required:** Yes; path, front-matter schema, required metadata, versioning and adapter policy.
+- **Proposed decision:** Keep one provider-neutral canonical source at `skills/repository-audit/SKILL.md`, using Markdown instructions plus YAML front matter for stable metadata. Later provider-specific packaging, if needed, is generated/adapted from this source and is not independently authoritative. Proposed metadata: `name`, `description`, `version`; exact repository-audit types/schema remain a scoped technical decision.
+- **Owner decision required:** Exact repository-audit path/schema/versioning and adapter policy; ordinary native Skill layout is accepted separately in the status reconciliation above.
 - **Consequences / alternatives:** Human-readable and diffable without runtime dependencies; metadata parsing needs validation. Alternatives include structured JSON/YAML as source or another established Skill convention selected by the team.
 
 ## ADR-M1-03 — Minimal Skill validation
 
 - **Verified fact:** No stack, test framework, package manager, or CI is present on the audited branch.
-- **Proposed decision:** Begin with dependency-free structural validation: required front-matter keys/types, required sections, canonical path, and prohibited claims/permissions checks. Member 2 supplies isolated temporary-repository fixtures and expected outcomes. Use a small standard-library script only after format approval; otherwise start with a manual checklist. Add no dependency in M1.
-- **Team approval required:** Yes; schema, validator location/runtime, and whether M1 permits a standard-library script.
+- **Proposed decision:** Use dependency-free structural validation with existing repository test conventions; preserve behavioral evaluation as a separate activity. The protected repository-audit validator's exact schema, interface, and acceptance cases remain pending.
+- **Owner decision required:** Exact protected validator schema/interface and acceptance cases. Ordinary local `unittest` and named repository scripts are accepted separately in the status reconciliation above.
 - **Consequences / alternatives:** Low setup cost but limited semantic coverage. A schema library or CI gate can be considered after toolchain approval.
 
 ## ADR-M1-04 — First Skill selection
 
 - **Verified fact:** No Skills exist on the audited branch; repository inspection was part of the M0 audit.
-- **Proposed decision:** Select `repository-audit`, a read-only Skill that reports scoped repository evidence and uncertainty. Require explicit root and scope, canonical boundary validation, JSON output, and the command allowlist and sensitive-content rules in the Skill specification.
-- **Team approval required:** Yes; confirm the first Skill and allowed command set.
+- **Decision:** The Project Owner selected `repository-audit` as the first Skill and approved a specific specification revision; the exact approval and policy decisions are recorded below. This does not close its implementation/evaluation/security gates or authorize execution.
+- **Remaining Owner decision:** Any change to the protected specification, exact contract details that were not approved, or new execution/evaluation authorization must be separately recorded.
 - **Consequences / alternatives:** Exercises evidence and safety requirements without application code or external integrations. Alternatives include a smaller README/metadata checker or postponing implementation until format decisions are complete.
 
 ### ADR-M1-04 scoped contract decisions — ACCEPTED BY PROJECT OWNER
@@ -67,7 +114,7 @@ The Project Owner accepted the four policy decisions below on 2026-10-13. Proven
 | Opaque identifiers | Do not emit raw paths, branch names, command arguments, or caller-controlled strings. Use deterministic report-local IDs and counts. | Reduces direct disclosure; accepted residual risk: counts and deterministic ordering may leak membership or relative order. IDs do not provide anonymity. | Repeated fixture outputs are byte-identical; evaluator confirms markers for paths, branch names, arguments, and caller strings are absent. | Runtime output behavior and exact specification revision approval remain outstanding. | **ACCEPTED — PROJECT OWNER, 2026-10-13** |
 | Input/output limits | Request ≤64 KiB UTF-8; root ≤4 KiB; each path ≤1 KiB; maximum 500 paths; claims/summaries ≤256 Unicode code points; final JSON ≤256 KiB. Reject the whole request before inspection if any input cap is exceeded. | Bounds request and output resources; whole-request rejection avoids silently narrowing requested scope. Large otherwise-valid requests may be rejected. | Exact below/at/above boundary tests; zero process starts for rejected requests; bounded valid JSON and deterministic output-cap behavior. | Runtime enforcement and exact specification revision approval remain outstanding. | **ACCEPTED — PROJECT OWNER, 2026-10-13** |
 
-**Required evidence:** Member 3 must identify implementation gaps and provide reproducible host-enforcement evidence where available; Member 2 must confirm deterministic fixture/oracle coverage and independently evaluate the exact Owner-approved specification revision. These accepted decisions do not establish those capabilities or results.
+**Required evidence:** An authorized implementer must identify implementation gaps and provide reproducible host-enforcement evidence where available; a genuinely separate evaluator must assess the exact Owner-approved specification revision when independent evaluation is required. These accepted decisions do not establish those capabilities or results.
 
 ### Exact-revision specification approval — APPROVED — EXACT REVISION ONLY
 
@@ -105,28 +152,28 @@ The specification approval remains limited to the exact recorded hash. Any corre
 
 ## ADR-M1-05 — Ownership of source, fixtures and security policy
 
-- **Verified fact:** M0 assigns `skills/*` and validator scripts to Member 3; evaluation/testing docs to Member 2; security policy docs to Member 1.
-- **Proposed decision:** Per `OWNER-DECISION-M1-01`, Member 3 owns `skills/repository-audit/SKILL.md`, `scripts/validate-skill.py`, and implementation tests under `tests/skills/repository-audit/`. Member 2 owns the independent evaluation plan, fixtures, rubric, and reports. Proposed evaluation path: `docs/evaluation/repository-audit/`, pending Member 2 confirmation. Member 1 owns architecture and security-policy records, including this ADR. One accountable editor per file; reviewers do not co-own implementation tests or independent evaluation evidence.
-- **Team approval required:** Yes; Member 2 must confirm evaluator identity, evaluation artifact path, and scope. The ADR remains Pending until its required approvals are recorded.
-- **Consequences / alternatives:** Separates implementation tests from independent evaluation evidence. If Member 2 rejects the proposed path, select a distinct path under the Member 2-owned evaluation documentation area without moving or replacing Member 3's tests.
+- **Historical context:** M0 assigned paths to Member 1/2/3. Those assignments are inactive and do not identify current maintainers or reviewers.
+- **Decision:** Under `OWNER-DECISION-M2.29-01`, the Project Owner assigns exact file scope and is accountable for repository-local source, architecture, and evidence. An instructed coding agent may implement within authorized scope but does not become an approval authority. Keep one accountable editor per file. Independent evaluation artifacts must remain distinguishable from implementation tests and must not be attributed to an unavailable reviewer.
+- **Status:** **ACCEPTED for the solo-maintainer ownership model**, 2026-10-29. The independent-evaluator identity and any separate evaluation artifact authority remain unassigned; do not claim independent evidence.
+- **Consequences / limits:** Historical M1 implementation authorization remains limited to its listed paths and activities. This ownership decision does not authorize protected Skill execution, evaluation, integration, or release.
 
 ## ADR-M1-06 — Lifecycle approval authority
 
-- **Verified fact:** M0 distinguishes IMPLEMENTED, EVALUATED and APPROVED but names no approval authority.
-- **Proposed decision:** Implementer attests IMPLEMENTED with artifact and change evidence; Member 2 records EVALUATED only after independent verification with exact invocation, expected/actual results, limitations and evaluator identity; APPROVED requires explicit team-designated approver(s), recorded with reviewer evidence in the PR/decision record. No state implies the next.
-- **Team approval required:** Yes; name approver(s), quorum/consensus rule and status-record location.
-- **Consequences / alternatives:** Keeps evaluation distinct from acceptance. Alternatives include a single architecture-lead approver or cross-functional approval for security-sensitive modules.
+- **Decision:** Record implementation as an implementer claim supported by changed artifacts; record automated checks as automated evidence; record `EVALUATED` as independent only when the required separate verifier has performed the evaluation and is identified; record final acceptance and release only after an explicit Project Owner decision. Implementation, testing, independent evaluation, authorization, acceptance, and release are distinct states; none implies the next.
+- **Authority:** The Project Owner is the final acceptance and release authority for this repository. A separate verifier is still required wherever the criterion or protected process requires independent verification. A separate security, external, legal, or protected-workflow approval remains mandatory where applicable.
+- **Status:** **ACCEPTED for the solo-maintainer lifecycle model**, 2026-10-29. This decision does not approve any artifact, record an evaluation result, or grant release approval.
+- **Evidence location:** Use the relevant scoped decision/evidence record; do not treat a successful workflow or caller-supplied evidence string as authenticated approval.
 
 ## Approval log
 
-| Decision | Team outcome | Approver(s) | Date | Evidence/link |
+| Decision | Current scoped outcome | Approver(s) | Date | Evidence/link |
 |---|---|---|---|---|
-| ADR-M1-01 | Pending | — | — | — |
-| ADR-M1-02 | Pending | — | — | — |
-| ADR-M1-03 | Pending | — | — | — |
-| ADR-M1-04 | Pending | — | — | — |
-| ADR-M1-05 | Pending | — | — | — |
-| ADR-M1-06 | Pending | — | — | — |
+| ADR-M1-01 | Pending: integration base/sequence | — | — | Current status table above |
+| ADR-M1-02 | Accepted: current native Skill layout only; protected Skill schema remains pending | Project Owner | 2026-10-29 | Current status table above |
+| ADR-M1-03 | Accepted: ordinary local validation approach only; protected validator/evaluation remains gated | Project Owner | 2026-10-29 | Current status table above |
+| ADR-M1-04 | Partial: protected contract/execution/evaluation gates remain open | Project Owner for recorded scoped decisions | 2026-10-29 | Existing exact-revision and scoped decision records |
+| ADR-M1-05 | Accepted: solo ownership model; independent evaluator remains unassigned | Project Owner | 2026-10-29 | `OWNER-DECISION-M2.29-01` |
+| ADR-M1-06 | Accepted: distinct lifecycle states and Owner authority; no release approval | Project Owner | 2026-10-29 | `OWNER-DECISION-M2.29-01` |
 
 ## Project Owner governance decision — OWNER-DECISION-M1-01
 
@@ -143,7 +190,7 @@ The specification approval remains limited to the exact recorded hash. Any corre
 
 ### Open conditions retained
 
-The following remain unresolved and must not be inferred from the bounded authorization: canonical integration base and reconciliation sequence; final Skill metadata/schema/versioning and compatibility policy; validator interface, path behavior, and exit codes; security details affecting safe implementation; concrete ownership/evidence paths not specified above; and the required timestamp/evidence location for the final specification record. Work affected by an unresolved safety contract must pause pending a Project Owner decision. ADR-M1-01 through ADR-M1-06 therefore remain **Pending** until their individual requirements are resolved and recorded.
+The following remain unresolved and must not be inferred from the bounded authorization: canonical integration base and reconciliation sequence; protected Skill metadata/schema/versioning and compatibility policy; protected validator interface, path behavior, and exit codes; security details affecting safe implementation; concrete evidence paths not specified above; and any separate execution/evaluation/host-qualification authorization. Work affected by an unresolved safety contract must pause pending the appropriate Project Owner decision or separate required approval. ADR-M1-01 and the unresolved protected portions of ADR-M1-02 through ADR-M1-04 remain open; ADR-M1-05 and ADR-M1-06 are accepted within the scoped solo operating model.
 
 ## Project Owner correction authorization — OWNER-DECISION-M2.6-01
 

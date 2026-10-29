@@ -180,7 +180,10 @@ def discover_skill_manifests(repository_root: Path) -> tuple[Path, ...]:
             name
             for name in directory_names
             if name.casefold() not in _IGNORED_DISCOVERY_DIRECTORIES
-            and not (current_path / name).is_symlink()
+            and not (
+                (current_path / name).is_symlink()
+                or (current_path / name).is_junction()
+            )
         )
         candidates.extend(
             current_path / name

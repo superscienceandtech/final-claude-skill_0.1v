@@ -1,6 +1,8 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.skill_registry import (
     DuplicateSkillError,
@@ -374,6 +376,58 @@ class SkillDiscoveryTests(unittest.TestCase):
 
             with self.assertRaisesRegex(SkillMetadataError, "outside the repository root"):
                 discover_skills(root)
+
+    def test_native_discovery_does_not_walk_junction_directories(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            junction_target = root / "skills" / "junctioned"
+            skill_directory = junction_target / "hidden-skill"
+            skill_directory.mkdir(parents=True)
+            (skill_directory / "SKILL.md").write_text(
+                "---\nname: hidden-skill\ndescription: Hidden\n---\n",
+                encoding="utf-8",
+            )
+            original_is_junction = Path.is_junction
+
+            def is_junction(path: Path) -> bool:
+                if path == junction_target:
+                    return True
+                return original_is_junction(path)
+
+            with patch.object(Path, "is_junction", is_junction):
+                result = discover_skills(root)
+
+            self.assertEqual(result.skills, ())
+            self.assertEqual(result.issues, ())
+
+
+class ClaudeCodePluginIntegrationTests(unittest.TestCase):
+    def test_plugin_exposes_registry_skills_from_the_canonical_directory(self):
+        repository_root = Path(__file__).resolve().parents[1]
+        manifest_path = repository_root / ".claude-plugin" / "plugin.json"
+
+        with manifest_path.open(encoding="utf-8") as manifest_file:
+            manifest = json.load(manifest_file)
+
+        discovered = discover_skills(repository_root)
+
+        self.assertEqual(manifest_path.parents[1], repository_root)
+        self.assertEqual(manifest["name"], "claude-skills-library")
+        self.assertTrue(manifest["description"].strip())
+        self.assertNotIn("skills", manifest)
+        self.assertEqual(discovered.issues, ())
+        self.assertGreater(len(discovered.skills), 0)
+        source_paths = [skill.source_path for skill in discovered.skills]
+        self.assertEqual(len(source_paths), len(set(source_paths)))
+        for skill in discovered.skills:
+            with self.subTest(skill=skill.identifier):
+                self.assertEqual(
+                    skill.source_path,
+                    Path("skills") / skill.identifier / "SKILL.md",
+                )
+                self.assertTrue(
+                    (repository_root / skill.source_path).is_file()
+                )
 
 
 if __name__ == "__main__":

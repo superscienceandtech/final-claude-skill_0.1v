@@ -40,13 +40,23 @@ from scripts.tool_framework import (
     register_text_statistics,
 )
 from scripts.tool_workflow import (
+    ImplementationStatus,
+    ImplementationVerificationHandoff,
+    ReleaseStatus,
     StepStatus,
+    VerificationOutcome,
     WorkflowDefinition,
     WorkflowEngine,
     WorkflowInputRef,
     WorkflowRegistry,
     WorkflowStatus,
     WorkflowStep,
+)
+from scripts.validation_adapter import (
+    ValidationCommand,
+    ValidationCommandAdapter,
+    ValidationOperation,
+    execute_handoff_workflow,
 )
 
 
@@ -200,6 +210,23 @@ class SkillManifestIntegrationTests(unittest.TestCase):
         self.assertTrue(contract.strict_inputs)
         self.assertTrue(contract.strict_outputs)
         self.assertEqual(contract.tools, ("local.text-statistics",))
+
+    def test_manifest_discovery_does_not_walk_junction_directories(self) -> None:
+        junction_target = self.root / "catalog" / "junctioned"
+        manifest = junction_target / "hidden.manifest.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(json.dumps(_manifest()), encoding="utf-8")
+        original_is_junction = Path.is_junction
+
+        def is_junction(path: Path) -> bool:
+            if path == junction_target:
+                return True
+            return original_is_junction(path)
+
+        with patch.object(Path, "is_junction", is_junction):
+            discovered = discover_skill_manifests(self.root)
+
+        self.assertEqual(discovered, ())
 
     def test_manifest_errors_and_root_containment_are_structured(self) -> None:
         outside_manifest = self.root.parent / "outside.manifest.json"
@@ -413,7 +440,7 @@ class SkillManifestIntegrationTests(unittest.TestCase):
             "execution_unavailable",
         )
 
-    def test_manifest_to_workflow_path_preserves_status_and_error_envelope(self) -> None:
+    def test_skill_workflow_validation_handoff_reports_success(self) -> None:
         manifest_path = self._write_manifest("skills/text-analysis.manifest.json")
         manifest = load_skill_manifest(manifest_path, self.root)
         tools = ToolRegistry()
@@ -483,33 +510,51 @@ class SkillManifestIntegrationTests(unittest.TestCase):
         )
         engine = WorkflowEngine(workflows, tools, executor)
 
-        result = engine.execute(
+        tests_directory = self.root / "tests"
+        tests_directory.mkdir()
+        (tests_directory / "__init__.py").write_text("", encoding="utf-8")
+        (tests_directory / "test_skill_result.py").write_text(
+            "import unittest\n"
+            "class SkillResultTest(unittest.TestCase):\n"
+            "    def test_succeeded(self):\n"
+            "        self.assertEqual('ok', 'ok')\n",
+            encoding="utf-8",
+        )
+        execution = execute_handoff_workflow(
+            engine,
             "workflow.text-analysis",
             {"task": "analyze", "text": "hello world"},
-            include_outputs=True,
+            ValidationCommandAdapter(self.root),
+            (
+                ValidationCommand(
+                    "skill-result-test",
+                    ValidationOperation.UNITTEST,
+                    ("tests.test_skill_result",),
+                ),
+            ),
+            ImplementationVerificationHandoff(
+                task_objective="Analyze supplied text through the registered Skill.",
+                status=ImplementationStatus.NOT_RUN,
+                verification_status=VerificationOutcome.NOT_RUN,
+                release_status=ReleaseStatus.UNKNOWN,
+                next_action="Review the validation run independently.",
+            ),
         )
+        result = execution.workflow_result
 
         self.assertEqual(result.status, WorkflowStatus.SUCCEEDED)
-        step = result.step_result("analyze")
-        if step is None:
-            self.fail("completed workflow must retain the analyze step")
-        self.assertEqual(step.status, StepStatus.SUCCEEDED)
-        if step.tool_result is None or step.tool_result.output is None:
-            self.fail("successful opted-in workflow step must include Tool output")
-        self.assertEqual(step.tool_result.status, ToolStatus.SUCCEEDED)
-        envelope = step.tool_result.output
-        self.assertEqual(envelope["skill_status"], SkillExecutionStatus.SUCCEEDED.value)
-        self.assertEqual(envelope["skill_identifier"], "text-analysis")
-        self.assertEqual(envelope["skill_contract_version"], "1.2.0")
-        skill_output = envelope.get("skill_output")
-        if not isinstance(skill_output, Mapping):
-            self.fail("successful embedded Skill result must include its output")
-        statistics = skill_output.get("statistics")
-        if not isinstance(statistics, Mapping):
-            self.fail("embedded statistics output must be a mapping")
-        self.assertEqual(statistics.get("words"), 2)
+        self.assertEqual(execution.validation_runs[0].outcome, "succeeded")
+        self.assertEqual(execution.handoff.workflow_execution.status, WorkflowStatus.SUCCEEDED)
+        self.assertEqual(execution.handoff.verification_status, VerificationOutcome.NOT_RUN)
+        self.assertEqual(execution.handoff.release_status, ReleaseStatus.UNKNOWN)
+        serialized = json.loads(execution.to_json())
+        self.assertEqual(
+            serialized["workflow_execution"]["status"],
+            WorkflowStatus.SUCCEEDED.value,
+        )
+        self.assertEqual(serialized["validation_runs"][0]["outcome"], "succeeded")
 
-    def test_workflow_tool_success_does_not_mask_skill_failure(self) -> None:
+    def test_skill_failure_fails_workflow_and_skips_validation(self) -> None:
         manifest_path = self._write_manifest("skills/text-analysis.manifest.json")
         contract = load_skill_manifest(manifest_path, self.root).contract
         tools = ToolRegistry()
@@ -562,22 +607,51 @@ class SkillManifestIntegrationTests(unittest.TestCase):
         )
         engine = WorkflowEngine(workflows, tools, executor)
 
-        result = engine.execute(
+        execution = execute_handoff_workflow(
+            engine,
             "workflow.text-analysis",
             {"task": "analyze", "text": "hello"},
-            include_outputs=True,
+            ValidationCommandAdapter(self.root),
+            (
+                ValidationCommand(
+                    "skill-result-test",
+                    ValidationOperation.UNITTEST,
+                    ("tests.test_missing_validation_target",),
+                ),
+            ),
+            ImplementationVerificationHandoff(
+                task_objective="Ensure failed Skill execution is not reported as success.",
+                status=ImplementationStatus.NOT_RUN,
+                verification_status=VerificationOutcome.NOT_RUN,
+                release_status=ReleaseStatus.UNKNOWN,
+                next_action="Fix the Skill implementation, then rerun validation.",
+            ),
         )
 
-        self.assertEqual(result.status, WorkflowStatus.SUCCEEDED)
-        step = result.step_result("analyze")
+        self.assertEqual(execution.workflow_result.status, WorkflowStatus.FAILED)
+        self.assertEqual(execution.validation_runs[0].outcome, "skipped")
+        self.assertEqual(
+            execution.validation_runs[0].limitation,
+            "validation_skipped_because_tool_workflow_did_not_succeed",
+        )
+        self.assertEqual(
+            execution.handoff.workflow_execution.status,
+            WorkflowStatus.FAILED,
+        )
+        self.assertEqual(execution.handoff.verification_status, VerificationOutcome.NOT_RUN)
+        self.assertEqual(execution.handoff.release_status, ReleaseStatus.UNKNOWN)
+        serialized = json.loads(execution.to_json())
+        self.assertEqual(
+            serialized["workflow_execution"]["status"],
+            WorkflowStatus.FAILED.value,
+        )
+        self.assertEqual(serialized["validation_runs"][0]["outcome"], "skipped")
+        step = execution.workflow_result.step_result("analyze")
         if step is None:
-            self.fail("completed workflow must retain the analyze step")
-        self.assertEqual(step.status, StepStatus.SUCCEEDED)
-        if step.tool_result is None or step.tool_result.output is None:
-            self.fail("successful opted-in workflow step must include Tool output")
-        envelope = step.tool_result.output
-        self.assertEqual(envelope["skill_status"], SkillExecutionStatus.FAILED.value)
-        self.assertEqual(envelope["skill_error_code"], "invalid_skill_output")
+            self.fail("failed workflow must retain the analyze step")
+        self.assertEqual(step.status, StepStatus.TOOL_FAILED)
+        self.assertIsNotNone(step.tool_result)
+        self.assertEqual(step.tool_result.error_code, "skill_invalid_skill_output")
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from scripts.skill_pipeline import (
     InvocationRequest,
     InvocationValidationError,
     SkillExecutionResult,
+    SkillExecutionStatus,
     SkillPipeline,
 )
 from scripts.skill_registry import (
@@ -169,6 +170,14 @@ class SkillWorkflowAdapter(ToolAdapter):
             raise ToolRuntimeError(
                 "Skill invocation was rejected before execution."
             ) from error
+        if result.status is not SkillExecutionStatus.SUCCEEDED:
+            skill_error_code = result.error_code or result.status.value
+            if not skill_error_code.startswith("skill_"):
+                skill_error_code = f"skill_{skill_error_code}"
+            raise ToolRuntimeError(
+                "configured Skill execution did not succeed.",
+                error_code=skill_error_code,
+            )
         return _skill_result_output(result)
 
 

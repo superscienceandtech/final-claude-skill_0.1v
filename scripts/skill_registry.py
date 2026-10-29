@@ -498,7 +498,10 @@ def discover_skills(repository_root: Path) -> DiscoveryResult:
             name
             for name in subdirectories
             if name not in _DISCOVERY_DIRECTORIES
-            and not (Path(directory) / name).is_symlink()
+            and not (
+                (Path(directory) / name).is_symlink()
+                or (Path(directory) / name).is_junction()
+            )
         )
         for filename in sorted(filenames):
             source = Path(directory) / filename

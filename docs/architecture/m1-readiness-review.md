@@ -6,6 +6,10 @@
 
 **Historical snapshot:** Repository-state findings below describe that baseline
 only; they are not a current inventory or authorization status.
+The ADR status summary below is also historical and is superseded by the
+current scoped decision table in
+[m1-architecture-decisions.md](./decisions/m1-architecture-decisions.md)
+and current reassessment in [m2-prerequisite-status.md](./m2-prerequisite-status.md).
 
 ## Verified repository state
 

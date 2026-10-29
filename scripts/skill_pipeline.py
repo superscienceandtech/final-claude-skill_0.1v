@@ -58,6 +58,39 @@ class SkillExecutionStatus(str, Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     UNAVAILABLE = "unavailable"
+    CANCELLED = "cancelled"
+
+
+class SkillExecutionFailure(RuntimeError):
+    """Raised by an adapter to preserve a safe execution outcome."""
+
+    def __init__(
+        self,
+        error_code: str,
+        *,
+        status: SkillExecutionStatus = SkillExecutionStatus.FAILED,
+        details: Mapping[str, object] | None = None,
+    ) -> None:
+        if status not in {
+            SkillExecutionStatus.FAILED,
+            SkillExecutionStatus.CANCELLED,
+        }:
+            raise ValueError("execution failure status must be failed or cancelled.")
+        if not isinstance(error_code, str) or not re.fullmatch(
+            r"[a-z0-9]+(?:_[a-z0-9]+)*", error_code
+        ):
+            raise ValueError("error_code must be a lowercase identifier.")
+        if details is not None and (
+            not isinstance(details, Mapping)
+            or any(not isinstance(key, str) or not key.strip() for key in details)
+        ):
+            raise ValueError("details must be a mapping with non-empty string keys.")
+        self.error_code = error_code
+        self.status = status
+        self.details = (
+            None if details is None else MappingProxyType(dict(details))
+        )
+        super().__init__(error_code)
 
 
 class SelectionStatus(str, Enum):
@@ -223,12 +256,26 @@ class SkillExecutionResult:
     error_code: str | None = None
     tool_invocations: tuple[SkillToolInvocation, ...] = ()
     contract_version: str = DEFAULT_CONTRACT_VERSION
+    failure_details: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not is_valid_contract_version(self.contract_version):
             raise ValueError("contract_version must use canonical major.minor.patch format.")
         if self.output is not None:
             object.__setattr__(self, "output", MappingProxyType(dict(self.output)))
+        if self.failure_details is not None:
+            if not isinstance(self.failure_details, Mapping) or any(
+                not isinstance(key, str) or not key.strip()
+                for key in self.failure_details
+            ):
+                raise ValueError(
+                    "failure_details must be a mapping with non-empty string keys."
+                )
+            object.__setattr__(
+                self,
+                "failure_details",
+                MappingProxyType(dict(self.failure_details)),
+            )
         if not isinstance(self.tool_invocations, tuple) or any(
             not isinstance(invocation, SkillToolInvocation)
             for invocation in self.tool_invocations
@@ -245,6 +292,7 @@ class SkillExecutionResult:
             if (
                 self.output is None
                 or self.error_code is not None
+                or self.failure_details is not None
                 or any(
                     invocation.status is not ToolStatus.SUCCEEDED
                     for invocation in self.tool_invocations
@@ -254,6 +302,7 @@ class SkillExecutionResult:
         elif self.status is SkillExecutionStatus.UNAVAILABLE:
             if (
                 self.output is not None
+                or self.failure_details is not None
                 or self.error_code != "execution_unavailable"
             ):
                 raise ValueError("unavailable Skill execution requires execution_unavailable.")
@@ -265,8 +314,18 @@ class SkillExecutionResult:
                 "missing_skill_output",
                 "unexpected_skill_output",
                 "tool_execution_failed",
+                "source_edit_blocked",
+                "source_edit_conflict",
+                "source_edit_failed",
+                "source_edit_partial",
+                "source_edit_validation_failed",
             }:
                 raise ValueError("failed Skill execution requires a safe error code only.")
+        elif self.status is SkillExecutionStatus.CANCELLED:
+            if self.output is not None or self.error_code != "source_edit_cancelled":
+                raise ValueError(
+                    "cancelled Skill execution requires source_edit_cancelled."
+                )
         else:
             raise ValueError("status must be a SkillExecutionStatus value.")
 
@@ -623,6 +682,17 @@ class SkillPipeline:
                 tool_invocations=tuple(tool_invocations),
                 contract_version=validated_plan.skill.contract_version,
             )
+        except SkillExecutionFailure as error:
+            return _execution_failure(
+                request.request_id,
+                validated_plan.skill.identifier,
+                started_at,
+                error.error_code,
+                status=error.status,
+                failure_details=error.details,
+                tool_invocations=tuple(tool_invocations),
+                contract_version=validated_plan.skill.contract_version,
+            )
         except Exception:
             return _execution_failure(
                 request.request_id,
@@ -807,6 +877,7 @@ def _execution_failure(
     error_code: str,
     *,
     status: SkillExecutionStatus = SkillExecutionStatus.FAILED,
+    failure_details: Mapping[str, object] | None = None,
     tool_invocations: tuple[SkillToolInvocation, ...] = (),
     contract_version: str = DEFAULT_CONTRACT_VERSION,
 ) -> SkillExecutionResult:
@@ -819,6 +890,7 @@ def _execution_failure(
         error_code=error_code,
         tool_invocations=tool_invocations,
         contract_version=contract_version,
+        failure_details=failure_details,
     )
 
 

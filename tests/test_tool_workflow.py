@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
@@ -23,14 +24,21 @@ from scripts.tool_framework import (
     UnknownToolError,
 )
 from scripts.tool_workflow import (
+    AuthorizationStatus,
     DuplicateWorkflowError,
     EvictedWorkflowRunError,
     FailureCategory,
+    ImplementationStatus,
+    ImplementationVerificationHandoff,
     InvalidStepInputMappingError,
     InvalidWorkflowDefinitionError,
+    ReleaseStatus,
     StepOutputRef,
     StepStatus,
     UnknownWorkflowError,
+    VerificationCheck,
+    VerificationIndependence,
+    VerificationOutcome,
     WorkflowDefinition,
     WorkflowEngine,
     WorkflowEventType,
@@ -48,6 +56,11 @@ from scripts.tool_workflow import (
     WorkflowValidationCategory,
     _resolve_step_inputs,
     validate_workflow,
+)
+from scripts.source_change_evidence import (
+    SourceChangeKind,
+    SourceChangeReport,
+    SourceFileChange,
 )
 
 
@@ -67,6 +80,259 @@ def _contract(
         enabled=enabled,
         execution_availability=availability,
     )
+
+
+class ImplementationVerificationHandoffTests(unittest.TestCase):
+    def test_keeps_implementation_verification_and_release_statuses_separate(self):
+        report = ImplementationVerificationHandoff(
+            task_objective="Verify the handoff contract.",
+            status=ImplementationStatus.PARTIAL,
+            scope="Update repository-local evidence model.",
+            repository_areas_inspected=("scripts/", "tests/"),
+            files_changed=("scripts/tool_workflow.py",),
+            implementation_summary="Added a structured handoff model and tests.",
+            validation_checks=(
+                VerificationCheck(
+                    name="targeted workflow tests",
+                    command="python -B -m unittest tests.test_tool_workflow -v",
+                    result=VerificationOutcome.PASS,
+                    evidence="7 checks ran and passed.",
+                    source="local",
+                ),
+            ),
+            verifier_identity="reviewer@example.com",
+            verifier_independence=VerificationIndependence.UNKNOWN,
+            verification_status=VerificationOutcome.PASS,
+            verification_evidence="Separate invocation recorded in the review log.",
+            authorization_status=AuthorizationStatus.PENDING,
+            release_status=ReleaseStatus.NOT_APPROVED,
+            known_limitations=("No external CI evidence was available.",),
+            next_action="Wait for owner authorization before release claims.",
+        )
+
+        self.assertEqual(report.status, ImplementationStatus.PARTIAL)
+        self.assertEqual(report.verification_status, VerificationOutcome.PASS)
+        self.assertEqual(report.release_status, ReleaseStatus.NOT_APPROVED)
+        self.assertIsNotNone(report.validation_checks[0].evidence)
+
+    def test_serializes_handoff_as_deterministic_json(self):
+        report = ImplementationVerificationHandoff(
+            task_objective="Record a bounded change.",
+            status=ImplementationStatus.COMPLETE,
+            files_changed=("scripts/tool_workflow.py",),
+            verification_status=VerificationOutcome.NOT_RUN,
+            authorization_status=AuthorizationStatus.PENDING,
+            release_status=ReleaseStatus.NOT_APPROVED,
+            next_action="A separate verifier must run the checks.",
+        )
+
+        encoded = report.to_json()
+
+        self.assertEqual(encoded, report.to_json())
+        self.assertEqual(json.loads(encoded), report.to_dict())
+        self.assertEqual(json.loads(encoded)["status"], "complete")
+        self.assertEqual(json.loads(encoded)["verification_status"], "not_run")
+
+    def test_attaches_observed_source_changes_without_claiming_authentication(self):
+        report = SourceChangeReport(
+            scope_paths=("src/example.py",),
+            changes=(
+                SourceFileChange(
+                    path="src/example.py",
+                    kind=SourceChangeKind.MODIFIED,
+                    before_sha256="a" * 64,
+                    after_sha256="b" * 64,
+                    before_size_bytes=3,
+                    after_size_bytes=4,
+                ),
+            ),
+        )
+        handoff = ImplementationVerificationHandoff(
+            task_objective="Record a bounded source change.",
+            status=ImplementationStatus.PARTIAL,
+            next_action="Review the observed diff separately.",
+        ).attach_source_change_report(report)
+
+        serialized = json.loads(handoff.to_json())
+        self.assertEqual(handoff.files_changed, ("src/example.py",))
+        self.assertEqual(serialized["source_change_report"]["outcome"], "observed")
+        self.assertFalse(serialized["source_change_report"]["authenticated"])
+        self.assertEqual(
+            serialized["source_change_report"]["changes"][0]["kind"],
+            "modified",
+        )
+
+    def test_handoff_rejects_source_change_report_path_mismatch(self):
+        report = SourceChangeReport(
+            scope_paths=("src/actual.py",),
+            changes=(
+                SourceFileChange(
+                    path="src/actual.py",
+                    kind=SourceChangeKind.CREATED,
+                    before_sha256=None,
+                    after_sha256="a" * 64,
+                    before_size_bytes=None,
+                    after_size_bytes=1,
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "must match observed"):
+            ImplementationVerificationHandoff(
+                task_objective="Reject caller-supplied path mismatch.",
+                status=ImplementationStatus.PARTIAL,
+                files_changed=("src/claimed.py",),
+                source_change_report=report,
+                next_action="Correct the handoff evidence.",
+            )
+
+    def test_accepts_approved_release_only_with_recorded_evidence(self):
+        report = ImplementationVerificationHandoff(
+            task_objective="Record a verified release decision.",
+            status=ImplementationStatus.COMPLETE,
+            verifier_identity="project-owner",
+            verification_status=VerificationOutcome.PASS,
+            verification_evidence="The agreed checks passed in a separate invocation.",
+            validation_checks=(
+                VerificationCheck(
+                    name="targeted checks",
+                    command="python -B -m unittest tests.test_tool_workflow",
+                    result=VerificationOutcome.PASS,
+                    evidence="All targeted checks passed.",
+                ),
+            ),
+            authorization_status=AuthorizationStatus.GRANTED,
+            authorization_evidence="Owner authorization record.",
+            release_status=ReleaseStatus.APPROVED,
+            release_evidence="Owner release decision record.",
+        )
+
+        self.assertEqual(report.to_dict()["release_status"], "approved")
+
+    def test_requires_evidence_for_completed_verification_and_granted_authority(self):
+        with self.assertRaisesRegex(ValueError, "verification_evidence"):
+            ImplementationVerificationHandoff(
+                task_objective="Missing verification record.",
+                status=ImplementationStatus.COMPLETE,
+                verifier_identity="owner",
+                verification_status=VerificationOutcome.PASS,
+            )
+
+        with self.assertRaisesRegex(ValueError, "completed checks require evidence"):
+            VerificationCheck(
+                name="missing evidence",
+                command="python -B -m unittest",
+                result=VerificationOutcome.PASS,
+            )
+
+        with self.assertRaisesRegex(ValueError, "authorization_evidence"):
+            ImplementationVerificationHandoff(
+                task_objective="Missing authorization record.",
+                status=ImplementationStatus.PARTIAL,
+                authorization_status=AuthorizationStatus.GRANTED,
+            )
+
+    def test_requires_release_evidence_before_approved_status(self):
+        with self.assertRaisesRegex(ValueError, "release_evidence"):
+            ImplementationVerificationHandoff(
+                task_objective="Missing release record.",
+                status=ImplementationStatus.COMPLETE,
+                verifier_identity="owner",
+                verification_status=VerificationOutcome.PASS,
+                verification_evidence="Checks recorded.",
+                validation_checks=(
+                    VerificationCheck(
+                        name="targeted checks",
+                        command="python -B -m unittest tests.test_tool_workflow",
+                        result=VerificationOutcome.PASS,
+                        evidence="All targeted checks passed.",
+                    ),
+                ),
+                authorization_status=AuthorizationStatus.GRANTED,
+                authorization_evidence="Owner authorization recorded.",
+                release_status=ReleaseStatus.APPROVED,
+            )
+
+    def test_completed_verification_cannot_contain_failed_or_unrun_checks(self):
+        check = VerificationCheck(
+            name="unrun check",
+            command="python -B -m unittest",
+            result=VerificationOutcome.NOT_RUN,
+            limitation="The check has not been executed.",
+        )
+        with self.assertRaisesRegex(ValueError, "non-passing checks"):
+            ImplementationVerificationHandoff(
+                task_objective="Reject a false passing summary.",
+                status=ImplementationStatus.COMPLETE,
+                validation_checks=(check,),
+                verifier_identity="reviewer",
+                verification_status=VerificationOutcome.PASS,
+                verification_evidence="A claimed pass is insufficient.",
+            )
+
+        with self.assertRaisesRegex(ValueError, "validation_checks"):
+            ImplementationVerificationHandoff(
+                task_objective="Require check results for completed verification.",
+                status=ImplementationStatus.COMPLETE,
+                verifier_identity="reviewer",
+                verification_status=VerificationOutcome.PASS,
+                verification_evidence="No command evidence was supplied.",
+            )
+
+    def test_failed_verification_requires_a_failed_check(self):
+        check = VerificationCheck(
+            name="passed check",
+            command="python -B -m unittest tests.test_tool_workflow",
+            result=VerificationOutcome.PASS,
+            evidence="The command passed.",
+        )
+        with self.assertRaisesRegex(ValueError, "requires a failed validation check"):
+            ImplementationVerificationHandoff(
+                task_objective="Reject a false failed-check summary.",
+                status=ImplementationStatus.PARTIAL,
+                validation_checks=(check,),
+                verifier_identity="reviewer",
+                verification_status=VerificationOutcome.FAIL,
+                verification_evidence="No failed check was supplied.",
+            )
+
+    def test_rejects_non_string_handoff_paths_and_limitations(self):
+        with self.assertRaisesRegex(ValueError, "files_changed"):
+            ImplementationVerificationHandoff(
+                task_objective="Invalid changed path.",
+                status=ImplementationStatus.PARTIAL,
+                files_changed=(cast(Any, 12),),
+            )
+
+        with self.assertRaisesRegex(ValueError, "known_limitations"):
+            ImplementationVerificationHandoff(
+                task_objective="Invalid limitation.",
+                status=ImplementationStatus.PARTIAL,
+                known_limitations=(cast(Any, None),),
+            )
+
+    def test_rejects_approved_release_without_granted_authorization_or_passing_checks(self):
+        with self.assertRaisesRegex(ValueError, "approved release"):
+            ImplementationVerificationHandoff(
+                task_objective="Blocked release claim.",
+                status=ImplementationStatus.COMPLETE,
+                scope="Verification model only.",
+                verification_status=VerificationOutcome.NOT_RUN,
+                authorization_status=AuthorizationStatus.UNKNOWN,
+                release_status=ReleaseStatus.APPROVED,
+                next_action="Acquire approval evidence.",
+            )
+
+    def test_requires_reason_when_verification_is_blocked_or_not_run(self):
+        with self.assertRaisesRegex(ValueError, "next action"):
+            ImplementationVerificationHandoff(
+                task_objective="Task needs a verifier.",
+                status=ImplementationStatus.BLOCKED,
+                scope="No independent verifier available.",
+                verification_status=VerificationOutcome.BLOCKED,
+                authorization_status=AuthorizationStatus.PENDING,
+                release_status=ReleaseStatus.NOT_APPROVED,
+                next_action="",
+            )
 
 
 class WorkflowDefinitionTests(unittest.TestCase):
@@ -473,6 +739,70 @@ class WorkflowEngineTests(unittest.TestCase):
         )
         self.workflows.register(workflow)
         return workflow
+
+    def test_successful_run_attaches_to_handoff_without_claiming_verification(self):
+        self._workflow((WorkflowStep("stats", "local.stats", {"text": "safe"}),))
+        handoff = ImplementationVerificationHandoff(
+            task_objective="Run one configured workflow.",
+            status=ImplementationStatus.PARTIAL,
+            verification_status=VerificationOutcome.NOT_RUN,
+            next_action="A verifier must review the run evidence.",
+        )
+
+        result = self.engine.execute("workflow.example")
+        report = result.attach_to_handoff(handoff)
+        serialized = json.loads(report.to_json())
+
+        self.assertEqual(serialized["workflow_execution"]["status"], "succeeded")
+        self.assertEqual(
+            serialized["workflow_execution"]["successful_step_count"], 1
+        )
+        self.assertEqual(serialized["status"], "partial")
+        self.assertEqual(serialized["verification_status"], "not_run")
+        self.assertNotIn("safe", report.to_json())
+
+    def test_failed_run_attaches_as_failed_and_never_as_passed_verification(self):
+        self._workflow(
+            (WorkflowStep("failure", "local.failure", {"text": "private input"}),)
+        )
+        handoff = ImplementationVerificationHandoff(
+            task_objective="Run a workflow that may fail.",
+            status=ImplementationStatus.PARTIAL,
+            verification_status=VerificationOutcome.NOT_RUN,
+            next_action="Resolve the failed step, then verify separately.",
+        )
+
+        result = self.engine.execute("workflow.example")
+        report = result.attach_to_handoff(handoff)
+        serialized = json.loads(report.to_json())
+
+        self.assertEqual(serialized["workflow_execution"]["status"], "failed")
+        self.assertEqual(serialized["workflow_execution"]["failed_step_count"], 1)
+        self.assertEqual(serialized["verification_status"], "not_run")
+        self.assertEqual(serialized["release_status"], "unknown")
+        self.assertNotIn("private input", report.to_json())
+
+    def test_preflight_block_is_recorded_without_claiming_execution(self):
+        self._workflow(
+            (WorkflowStep("missing", "local.unknown", {}),)
+        )
+        handoff = ImplementationVerificationHandoff(
+            task_objective="Attempt a workflow with a missing tool.",
+            status=ImplementationStatus.BLOCKED,
+            verification_status=VerificationOutcome.BLOCKED,
+            next_action="Register the required tool before retrying.",
+        )
+
+        result = self.engine.execute("workflow.example")
+        report = result.attach_to_handoff(handoff)
+        serialized = json.loads(report.to_json())
+
+        self.assertEqual(
+            serialized["workflow_execution"]["status"], "preflight_failed"
+        )
+        self.assertFalse(serialized["workflow_execution"]["execution_began"])
+        self.assertEqual(serialized["workflow_execution"]["failed_step_count"], 0)
+        self.assertEqual(serialized["verification_status"], "blocked")
 
     def test_unknown_tool_and_invalid_mapping_preflight_without_execution(self):
         self._workflow(

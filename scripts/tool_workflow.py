@@ -8,6 +8,7 @@ from returned traces unless the caller opts in.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections import deque
@@ -20,6 +21,7 @@ from types import MappingProxyType
 from typing import Callable, Iterator, Mapping
 from uuid import uuid4
 
+from scripts.source_change_evidence import SourceChangeReport
 from scripts.tool_framework import (
     ExecutionAvailability,
     InputType,
@@ -122,6 +124,445 @@ class WorkflowStatus(str, Enum):
     PARTIAL = "partial"
     PREFLIGHT_FAILED = "preflight_failed"
     CANCELLED = "cancelled"
+
+
+class VerificationOutcome(str, Enum):
+    PASS = "pass"
+    PASS_WITH_WARNINGS = "pass_with_warnings"
+    FAIL = "fail"
+    TIMEOUT = "timeout"
+    BLOCKED = "blocked"
+    SKIPPED = "skipped"
+    NOT_RUN = "not_run"
+
+
+class VerificationIndependence(str, Enum):
+    UNKNOWN = "unknown"
+    INDEPENDENT = "independent"
+    SELF_REVIEW = "self_review"
+    NOT_REQUIRED = "not_required"
+
+
+class AuthorizationStatus(str, Enum):
+    GRANTED = "granted"
+    PENDING = "pending"
+    NOT_GRANTED = "not_granted"
+    UNKNOWN = "unknown"
+
+
+class ReleaseStatus(str, Enum):
+    APPROVED = "approved"
+    PENDING = "pending"
+    NOT_APPROVED = "not_approved"
+    UNKNOWN = "unknown"
+
+
+class ImplementationStatus(str, Enum):
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    BLOCKED = "blocked"
+    NOT_RUN = "not_run"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowExecutionEvidence:
+    """Outcome summary copied from an actual WorkflowResult without raw outputs."""
+
+    workflow_identifier: str
+    run_id: str
+    status: WorkflowStatus
+    execution_began: bool
+    execution_completed: bool
+    successful_step_count: int
+    failed_step_count: int
+    skipped_step_count: int
+    cancelled_step_count: int
+    error_code: str | None
+
+    def __post_init__(self) -> None:
+        for field_name in ("workflow_identifier", "run_id"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be a non-empty string.")
+        if not isinstance(self.status, WorkflowStatus):
+            raise ValueError("status must be a WorkflowStatus value.")
+        for field_name in ("execution_began", "execution_completed"):
+            if not isinstance(getattr(self, field_name), bool):
+                raise ValueError(f"{field_name} must be a boolean.")
+        for field_name in (
+            "successful_step_count",
+            "failed_step_count",
+            "skipped_step_count",
+            "cancelled_step_count",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{field_name} must be a non-negative integer.")
+        if self.error_code is not None and (
+            not isinstance(self.error_code, str) or not self.error_code.strip()
+        ):
+            raise ValueError("error_code must be a non-empty string or None.")
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationRunEvidence:
+    """Actual outcome from the constrained validation-command adapter."""
+
+    command_id: str
+    operation: str
+    command: str
+    outcome: str
+    exit_code: int | None
+    stdout: str
+    stderr: str
+    duration_seconds: float
+    limitation: str = ""
+    output_truncated: bool = False
+
+    def __post_init__(self) -> None:
+        for field_name in ("command_id", "operation", "command"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be a non-empty string.")
+        if not isinstance(self.outcome, str) or self.outcome not in {
+            "succeeded",
+            "failed",
+            "timed_out",
+            "cancelled",
+            "skipped",
+            "blocked",
+        }:
+            raise ValueError("outcome must be a supported validation run status.")
+        if self.exit_code is not None and (
+            not isinstance(self.exit_code, int) or isinstance(self.exit_code, bool)
+        ):
+            raise ValueError("exit_code must be an integer or None.")
+        if not isinstance(self.stdout, str) or not isinstance(self.stderr, str):
+            raise ValueError("stdout and stderr must be strings.")
+        if (
+            not isinstance(self.duration_seconds, (int, float))
+            or isinstance(self.duration_seconds, bool)
+            or self.duration_seconds < 0
+            or (
+                isinstance(self.duration_seconds, float)
+                and not math.isfinite(self.duration_seconds)
+            )
+        ):
+            raise ValueError("duration_seconds must be a non-negative number.")
+        if not isinstance(self.limitation, str):
+            raise ValueError("limitation must be a string.")
+        if not isinstance(self.output_truncated, bool):
+            raise ValueError("output_truncated must be a boolean.")
+        if self.outcome == "succeeded" and self.exit_code != 0:
+            raise ValueError("succeeded validation runs require exit_code 0.")
+        if self.outcome == "failed" and (
+            self.exit_code is None or self.exit_code == 0
+        ):
+            raise ValueError("failed validation runs require a non-zero exit code.")
+        if self.outcome in {"timed_out", "cancelled", "skipped", "blocked"} and not self.limitation:
+            raise ValueError(f"{self.outcome} validation runs require a limitation.")
+        if self.outcome in {"timed_out", "cancelled", "skipped", "blocked"} and self.exit_code is not None:
+            raise ValueError(f"{self.outcome} validation runs cannot have an exit code.")
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationCheck:
+    """One command or evaluation check with a recorded outcome.
+
+    Evidence strings are caller-provided references or claims, not authenticated
+    proof that the command ran or that its result is correct.
+    """
+
+    name: str
+    command: str
+    result: VerificationOutcome
+    evidence: str = ""
+    limitation: str = ""
+    source: str = "local"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("check name must be a non-empty string.")
+        if not isinstance(self.command, str) or not self.command.strip():
+            raise ValueError("command must be a non-empty string.")
+        if not isinstance(self.result, VerificationOutcome):
+            raise ValueError("result must be a VerificationOutcome value.")
+        if not isinstance(self.evidence, str):
+            raise ValueError("evidence must be a string.")
+        if not isinstance(self.limitation, str):
+            raise ValueError("limitation must be a string.")
+        if not isinstance(self.source, str) or not self.source.strip():
+            raise ValueError("source must be a non-empty string.")
+        if self.result in (
+            VerificationOutcome.PASS,
+            VerificationOutcome.PASS_WITH_WARNINGS,
+            VerificationOutcome.FAIL,
+        ) and not self.evidence.strip():
+            raise ValueError("completed checks require evidence.")
+        if self.result in (VerificationOutcome.BLOCKED, VerificationOutcome.NOT_RUN):
+            if not self.limitation.strip():
+                raise ValueError("blocked or unrun checks require a limitation reason.")
+
+
+@dataclass(frozen=True, slots=True)
+class ImplementationVerificationHandoff:
+    """Structured evidence package, not an execution or approval mechanism.
+
+    Caller-supplied evidence is not authenticated. Workflow execution evidence
+    is copied only from a validated WorkflowResult and does not imply code
+    implementation, verification, authorization, or release.
+    """
+
+    task_objective: str
+    status: ImplementationStatus
+    scope: str = ""
+    repository_areas_inspected: tuple[str, ...] = ()
+    files_changed: tuple[str, ...] = ()
+    implementation_summary: str = ""
+    validation_checks: tuple[VerificationCheck, ...] = ()
+    verifier_identity: str | None = None
+    verifier_independence: VerificationIndependence = VerificationIndependence.UNKNOWN
+    verification_status: VerificationOutcome = VerificationOutcome.NOT_RUN
+    authorization_status: AuthorizationStatus = AuthorizationStatus.UNKNOWN
+    release_status: ReleaseStatus = ReleaseStatus.UNKNOWN
+    known_limitations: tuple[str, ...] = ()
+    next_action: str = ""
+    verification_evidence: str = ""
+    authorization_evidence: str = ""
+    release_evidence: str = ""
+    workflow_execution: WorkflowExecutionEvidence | None = None
+    validation_runs: tuple[ValidationRunEvidence, ...] = ()
+    source_change_report: SourceChangeReport | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task_objective, str) or not self.task_objective.strip():
+            raise ValueError("task_objective must be a non-empty string.")
+        if not isinstance(self.status, ImplementationStatus):
+            raise ValueError("status must be an ImplementationStatus value.")
+        if not isinstance(self.scope, str):
+            raise ValueError("scope must be a string.")
+        for field_name in ("repository_areas_inspected", "files_changed"):
+            values = getattr(self, field_name)
+            if not isinstance(values, tuple) or any(
+                not isinstance(value, str) or not value.strip() for value in values
+            ):
+                raise ValueError(f"{field_name} must be a tuple of non-empty strings.")
+        if not isinstance(self.implementation_summary, str):
+            raise ValueError("implementation_summary must be a string.")
+        if not isinstance(self.validation_checks, tuple) or any(
+            not isinstance(check, VerificationCheck) for check in self.validation_checks
+        ):
+            raise ValueError("validation_checks must contain VerificationCheck values.")
+        if self.verifier_identity is not None and (
+            not isinstance(self.verifier_identity, str)
+            or not self.verifier_identity.strip()
+        ):
+            raise ValueError("verifier_identity must be a non-empty string or None.")
+        if not isinstance(self.verifier_independence, VerificationIndependence):
+            raise ValueError(
+                "verifier_independence must be a VerificationIndependence value."
+            )
+        if not isinstance(self.verification_status, VerificationOutcome):
+            raise ValueError("verification_status must be a VerificationOutcome value.")
+        if not isinstance(self.authorization_status, AuthorizationStatus):
+            raise ValueError("authorization_status must be an AuthorizationStatus value.")
+        if not isinstance(self.release_status, ReleaseStatus):
+            raise ValueError("release_status must be a ReleaseStatus value.")
+        if not isinstance(self.known_limitations, tuple) or any(
+            not isinstance(value, str) or not value.strip()
+            for value in self.known_limitations
+        ):
+            raise ValueError("known_limitations must be a tuple of non-empty strings.")
+        if not isinstance(self.next_action, str):
+            raise ValueError("next_action must be a string.")
+        for field_name in (
+            "verification_evidence",
+            "authorization_evidence",
+            "release_evidence",
+        ):
+            if not isinstance(getattr(self, field_name), str):
+                raise ValueError(f"{field_name} must be a string.")
+        if self.workflow_execution is not None and not isinstance(
+            self.workflow_execution, WorkflowExecutionEvidence
+        ):
+            raise ValueError("workflow_execution must be WorkflowExecutionEvidence or None.")
+        if not isinstance(self.validation_runs, tuple) or any(
+            not isinstance(run, ValidationRunEvidence) for run in self.validation_runs
+        ):
+            raise ValueError("validation_runs must contain ValidationRunEvidence values.")
+        if self.source_change_report is not None and not isinstance(
+            self.source_change_report, SourceChangeReport
+        ):
+            raise ValueError("source_change_report must be a SourceChangeReport or None.")
+        if self.source_change_report is not None and self.files_changed != (
+            self.source_change_report.changed_paths
+        ):
+            raise ValueError(
+                "files_changed must match observed source_change_report paths."
+            )
+        if self.verifier_independence in (
+            VerificationIndependence.INDEPENDENT,
+            VerificationIndependence.SELF_REVIEW,
+        ) and (
+            self.verifier_identity is None
+            or not self.verifier_identity.strip()
+        ):
+            raise ValueError("classified verification requires a verifier_identity.")
+        if self.verification_status in (
+            VerificationOutcome.PASS,
+            VerificationOutcome.PASS_WITH_WARNINGS,
+            VerificationOutcome.FAIL,
+        ):
+            if self.verifier_identity is None:
+                raise ValueError("completed verification requires a verifier_identity.")
+            if not self.verification_evidence.strip():
+                raise ValueError("completed verification requires verification_evidence.")
+            if not self.validation_checks:
+                raise ValueError("completed verification requires validation_checks.")
+        if self.verification_status is VerificationOutcome.PASS and any(
+            check.result is not VerificationOutcome.PASS
+            for check in self.validation_checks
+        ):
+            raise ValueError("passing verification cannot include non-passing checks.")
+        if self.verification_status is VerificationOutcome.PASS_WITH_WARNINGS and any(
+            check.result
+            not in (
+                VerificationOutcome.PASS,
+                VerificationOutcome.PASS_WITH_WARNINGS,
+            )
+            for check in self.validation_checks
+        ):
+            raise ValueError(
+                "verification with warnings cannot include failed or unrun checks."
+            )
+        if self.verification_status is VerificationOutcome.FAIL and not any(
+            check.result is VerificationOutcome.FAIL
+            for check in self.validation_checks
+        ):
+            raise ValueError("failed verification requires a failed validation check.")
+        if (
+            self.authorization_status is AuthorizationStatus.GRANTED
+            and not self.authorization_evidence.strip()
+        ):
+            raise ValueError("granted authorization requires authorization_evidence.")
+        if self.release_status is ReleaseStatus.APPROVED:
+            if self.verification_status is not VerificationOutcome.PASS:
+                raise ValueError("approved release requires passing verification evidence.")
+            if self.authorization_status is not AuthorizationStatus.GRANTED:
+                raise ValueError("approved release requires granted authorization.")
+            if not self.release_evidence.strip():
+                raise ValueError("approved release requires release_evidence.")
+        if self.verification_status in (VerificationOutcome.BLOCKED, VerificationOutcome.NOT_RUN):
+            if not self.next_action.strip():
+                raise ValueError(
+                    "unrun or blocked verification should record the next action required."
+                )
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a JSON-compatible handoff record."""
+        return {
+            "task_objective": self.task_objective,
+            "status": self.status.value,
+            "scope": self.scope,
+            "repository_areas_inspected": list(self.repository_areas_inspected),
+            "files_changed": list(self.files_changed),
+            "source_change_report": (
+                None
+                if self.source_change_report is None
+                else self.source_change_report.to_dict()
+            ),
+            "implementation_summary": self.implementation_summary,
+            "validation_checks": [
+                {
+                    "name": check.name,
+                    "command": check.command,
+                    "result": check.result.value,
+                    "evidence": check.evidence,
+                    "limitation": check.limitation,
+                    "source": check.source,
+                }
+                for check in self.validation_checks
+            ],
+            "verifier_identity": self.verifier_identity,
+            "verifier_independence": self.verifier_independence.value,
+            "verification_status": self.verification_status.value,
+            "verification_evidence": self.verification_evidence,
+            "authorization_status": self.authorization_status.value,
+            "authorization_evidence": self.authorization_evidence,
+            "release_status": self.release_status.value,
+            "release_evidence": self.release_evidence,
+            "known_limitations": list(self.known_limitations),
+            "next_action": self.next_action,
+            "workflow_execution": (
+                None
+                if self.workflow_execution is None
+                else {
+                    "workflow_identifier": self.workflow_execution.workflow_identifier,
+                    "run_id": self.workflow_execution.run_id,
+                    "status": self.workflow_execution.status.value,
+                    "execution_began": self.workflow_execution.execution_began,
+                    "execution_completed": self.workflow_execution.execution_completed,
+                    "successful_step_count": self.workflow_execution.successful_step_count,
+                    "failed_step_count": self.workflow_execution.failed_step_count,
+                    "skipped_step_count": self.workflow_execution.skipped_step_count,
+                    "cancelled_step_count": self.workflow_execution.cancelled_step_count,
+                    "error_code": self.workflow_execution.error_code,
+                }
+            ),
+            "validation_runs": [
+                {
+                    "command_id": run.command_id,
+                    "operation": run.operation,
+                    "command": run.command,
+                    "outcome": run.outcome,
+                    "exit_code": run.exit_code,
+                    "stdout": run.stdout,
+                    "stderr": run.stderr,
+                    "duration_seconds": run.duration_seconds,
+                    "limitation": run.limitation,
+                    "output_truncated": run.output_truncated,
+                }
+                for run in self.validation_runs
+            ],
+        }
+
+    def to_json(self) -> str:
+        """Serialize the handoff as deterministic compact JSON."""
+        return json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True)
+
+    def attach_validation_runs(
+        self, runs: tuple[ValidationRunEvidence, ...]
+    ) -> ImplementationVerificationHandoff:
+        """Attach actual adapter results without promoting verification status."""
+        if not isinstance(runs, tuple) or any(
+            not isinstance(run, ValidationRunEvidence) for run in runs
+        ):
+            raise ValueError("runs must be a tuple of ValidationRunEvidence values.")
+        if self.validation_runs:
+            raise ValueError("handoff already contains validation run evidence.")
+        return replace(self, validation_runs=runs)
+
+    def attach_source_change_report(
+        self, report: SourceChangeReport
+    ) -> ImplementationVerificationHandoff:
+        """Attach bounded filesystem observations without asserting authorship."""
+        if not isinstance(report, SourceChangeReport):
+            raise ValueError("report must be a SourceChangeReport.")
+        if self.source_change_report is not None:
+            raise ValueError("handoff already contains source-change observations.")
+        if self.files_changed and self.files_changed != report.changed_paths:
+            raise ValueError(
+                "files_changed must match observed source_change_report paths."
+            )
+        return replace(
+            self,
+            files_changed=report.changed_paths,
+            source_change_report=report,
+        )
+
+
+VerificationReport = ImplementationVerificationHandoff
+EvidenceReport = ImplementationVerificationHandoff
 
 
 class WorkflowProgressStatus(str, Enum):
@@ -1247,6 +1688,31 @@ class WorkflowResult:
             None,
         )
 
+    def attach_to_handoff(
+        self, handoff: ImplementationVerificationHandoff
+    ) -> ImplementationVerificationHandoff:
+        """Attach this real run outcome without changing other lifecycle statuses.
+
+        Tool workflow success is not proof that code was implemented, verified,
+        authorized, or released. Raw inputs and tool outputs are not copied.
+        """
+        if not isinstance(handoff, ImplementationVerificationHandoff):
+            raise ValueError("handoff must be an ImplementationVerificationHandoff.")
+        if handoff.workflow_execution is not None:
+            raise ValueError("handoff already contains workflow execution evidence.")
+        evidence = WorkflowExecutionEvidence(
+            workflow_identifier=self.workflow_identifier,
+            run_id=self.run_id,
+            status=self.status,
+            execution_began=self.execution_began,
+            execution_completed=self.execution_completed,
+            successful_step_count=self.successful_step_count,
+            failed_step_count=self.failed_step_count,
+            skipped_step_count=self.skipped_step_count,
+            cancelled_step_count=self.cancelled_step_count,
+            error_code=self.error_code,
+        )
+        return replace(handoff, workflow_execution=evidence)
 
 class WorkflowRunInspectionError(WorkflowError):
     """Base class for run-inspection failures."""
@@ -2865,7 +3331,17 @@ def _normalize_tool_result(
         ToolStatus.INVALID_INPUT: {"invalid_input"},
         ToolStatus.ADAPTER_MISSING: {"adapter_missing"},
         ToolStatus.ADAPTER_INCOMPATIBLE: {"adapter_incompatible"},
-        ToolStatus.FAILED: {"runtime_failure", "tool_execution_failed"},
+        ToolStatus.FAILED: {
+            "runtime_failure",
+            "tool_execution_failed",
+            "skill_source_unavailable",
+            "skill_execution_failed",
+            "skill_invalid_skill_output",
+            "skill_missing_skill_output",
+            "skill_unexpected_skill_output",
+            "skill_tool_execution_failed",
+            "skill_execution_unavailable",
+        },
     }
     allowed_codes = expected_codes[result.status]
     code = result.error_code

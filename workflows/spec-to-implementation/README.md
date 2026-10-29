@@ -4,7 +4,7 @@
 
 This workflow defines a minimal, provider-neutral, evidence-driven bridge from a software requirement to a controlled implementation and verification cycle.
 
-It is designed for Member 3 work within the Claude Skills repository and is intentionally narrow: it coordinates requirement readiness, repository inspection, dependency analysis, implementation planning, controlled coding, validation, and evidence-based reporting without expanding into an automation platform or a provider-specific integration layer.
+It is designed for the solo-maintainer repository: the Project Owner sets scope and authorization, and an explicitly capable coding agent may implement within those bounds. It coordinates requirement readiness, repository inspection, dependency analysis, implementation planning, controlled coding, validation, and evidence-based reporting without expanding into an automation platform or a provider-specific integration layer.
 
 ## Canonical Skill Reference
 
@@ -29,7 +29,7 @@ A task is eligible only when the following are true:
 - the task scope is bounded to repository-local changes or documented dependencies
 - the required repository instructions and conventions are inspectable
 - relevant validation tools or checks exist or are explicitly identified as unavailable
-- the task does not require unsupported Member 1 or Member 2 decisions
+- the task does not depend on an unresolved Project Owner decision or a separately required independent reviewer
 
 If essential information is missing, the workflow must mark the task as blocked and stop.
 
@@ -132,7 +132,7 @@ Evaluate:
 - interfaces, contracts, and compatibility constraints
 - likely regressions for the touched area
 - security-sensitive operations or data exposure
-- cross-member ownership boundaries and required approvals
+- file ownership boundaries, required approvals, and whether a genuinely independent reviewer is required
 
 Decision gate:
 
@@ -178,6 +178,56 @@ Output:
 
 - small, reviewable code or documentation changes within the approved scope
 
+### Source-editing integration boundary
+
+The current project runtime does not include a production caller that turns
+an implementation request into source edits. `scripts.tool_framework.ToolAdapter`
+is the existing provider-neutral extension interface:
+
+- register an explicit `ToolContract` in the `ToolRegistry`
+- implement `ToolAdapter.supports(contract)` and
+  `ToolAdapter.execute(contract, inputs) -> Mapping[str, object]`
+- register that adapter with the `ToolExecutor`
+- reference the exact tool identifier from a `WorkflowDefinition` executed by
+  `WorkflowEngine`
+
+This interface is an integration seam, not an editor and not a permission
+boundary. A future editor adapter must be backed by an actually available,
+supported editing capability; validate the authorized repository root and
+in-root target paths before any write; accept only explicit scoped inputs; and
+return structured outcomes that identify changed artifacts and failures. It
+must not execute caller-provided shell commands or obtain implicit secret
+access. The framework's in-process adapters execute with host-process
+permissions and do not provide sandbox isolation.
+
+The existing workflow handoff records workflow results but does not yet
+provide an authenticated source-change receipt. The bounded
+`scripts.source_change_evidence` module now snapshots explicitly selected
+repository-relative regular files and records created, modified, and deleted
+paths with SHA-256 digests. Observation is capped at 256 paths, 16 MiB per
+file, and 64 MiB total per snapshot. A configured caller can pass
+`source_paths=(...)` to `execute_handoff_workflow(...)`; the workflow
+snapshots those paths before execution and attaches the observed change report
+before validation. Partial changes are still recorded when the workflow fails,
+and an unavailable post-workflow snapshot is reported as `incomplete`, not as
+“no changes.”
+
+This is an observation of only the named paths. It neither constrains where a
+ToolAdapter can write nor proves which actor made the changes; the handoff
+marks it `authenticated: false`. It does not make `ToolAdapter` an editor.
+Separately, `scripts.source_editing_workflow` provides an explicitly wired
+local editor for caller-supplied contents under an exact application-level
+path grant, with expected-hash checks, fixed validation operations, and
+structured local test coverage. That workflow is not an AI edit generator or
+provider integration, and its checks are not a host-enforced sandbox.
+`scripts.source_editing_cli` exposes this workflow to a local caller using a
+bounded JSON request and explicit command-line path grants. It is a provider-
+neutral integration surface and runs only a fixed `git diff --check`; it does
+not run caller-selected tests, generate edits, authenticate the caller, or
+strengthen filesystem isolation.
+Workflow and validation outcomes do not promote implementation, verification,
+authorization, acceptance, or release.
+
 ## Stage G — Testing and debugging
 
 Select validation based on repository evidence. Relevant options may include:
@@ -187,6 +237,23 @@ Select validation based on repository evidence. Relevant options may include:
 - build steps
 - focused smoke tests
 - repository-local validation scripts
+
+The repository's `scripts.validation_adapter` module provides a constrained
+post-implementation CLI:
+
+```text
+python -B -m scripts.validation_adapter --repository-root . --task-objective "..." --unittest tests.test_MODULE --provider-manifest-check --git-diff-check
+```
+
+Only its explicitly listed fixed operations are accepted. It records real
+process outcomes in JSON; a nonzero CLI result means at least one selected
+check failed, timed out, or was blocked. This process is not a sandbox and does not edit code. A configured
+`WorkflowEngine` caller can use `execute_handoff_workflow(...)` to attach both
+actual workflow and validation results. No AI source-editing agent or
+production task-to-edit-generation caller is registered; the local editor
+accepts complete proposed contents and does not generate them.
+The provider-manifest operation checks local configuration against canonical
+Skill discovery only; it does not load or exercise the provider runtime.
 
 Requirements:
 
@@ -216,7 +283,9 @@ Review:
 Important distinction:
 
 - implementation completion is not equivalent to verified acceptance
-- independent approval is not equivalent to a successful implementation review
+- same-agent self-review is not independent verification
+- automated tests are test evidence, not independent human review
+- approval, authorization, CI, and release are separate outcomes
 
 Output:
 
@@ -253,7 +322,7 @@ Validation executed: <commands>
 Results: <PASS/FAIL/SKIPPED/NOT RUN>
 Evidence: <what was observed>
 Known limitations: <notes>
-Dependencies: <pending Member 1 / Member 2 status>
+Dependencies: <pending Project Owner decision or separately required verifier>
 Next action: <next task without starting it>
 
 ## Stage J — Stop gate
@@ -311,4 +380,4 @@ This workflow is intentionally a foundation, not a complete automation system. I
 
 ## Summary
 
-This workflow foundation is designed to establish a disciplined and reviewable path from requirement to verified implementation, while staying within Member 3's responsibilities and preserving the canonical implementation Skill as the reusable source of implementation rules.
+This workflow foundation is designed to establish a disciplined and reviewable path from requirement through implementation and actual validation evidence, while preserving the canonical implementation Skill as the reusable source of implementation rules. If no capable editor is connected or a required independent verifier is unavailable, state that boundary and do not claim the corresponding stage complete.

@@ -61,7 +61,20 @@ class UnsupportedToolError(ToolError):
 
 
 class ToolRuntimeError(ToolError):
-    """Raised only by callers explicitly invoking a local tool implementation."""
+    """Raised by local adapters with a safe, structured runtime error code."""
+
+    def __init__(
+        self, message: str, *, error_code: str = "runtime_failure"
+    ) -> None:
+        if not isinstance(message, str) or not message:
+            raise ValueError("message must be a non-empty string.")
+        if (
+            not isinstance(error_code, str)
+            or not re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)*", error_code)
+        ):
+            raise ValueError("error_code must be a lowercase underscore identifier.")
+        super().__init__(message)
+        self.error_code = error_code
 
 
 class InputType(str, Enum):
@@ -428,6 +441,16 @@ class ToolExecutor:
                 raise ToolRuntimeError(
                     "adapter compatibility check returned an invalid result."
                 )
+        except ToolRuntimeError as error:
+            return _failure(
+                request,
+                ToolStatus.FAILED,
+                error.error_code,
+                ToolRuntimeError(
+                    f"adapter compatibility check failed ({type(error).__name__}).",
+                    error_code=error.error_code,
+                ),
+            )
         except Exception as error:
             return _failure(
                 request,
@@ -457,6 +480,16 @@ class ToolExecutor:
         except IncompatibleAdapterError as error:
             return _failure(
                 request, ToolStatus.ADAPTER_INCOMPATIBLE, "adapter_incompatible", error
+            )
+        except ToolRuntimeError as error:
+            return _failure(
+                request,
+                ToolStatus.FAILED,
+                error.error_code,
+                ToolRuntimeError(
+                    f"adapter execution failed ({type(error).__name__}).",
+                    error_code=error.error_code,
+                ),
             )
         except Exception as error:
             return _failure(

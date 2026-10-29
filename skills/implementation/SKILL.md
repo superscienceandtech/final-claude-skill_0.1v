@@ -109,6 +109,27 @@ Implementation rules:
 - keep secrets, credentials, and sensitive values out of source code and logs
 - do not silently widen the scope of the task
 
+### Repository-local bounded editing bridge
+
+This repository includes an optional local editing workflow in
+`scripts.source_editing_workflow`. It is callable only when explicitly wired
+through `create_source_editing_pipeline(...)` with an application-level grant
+for exact repository-relative paths. Each request supplies proposed UTF-8 file
+contents, the expected prior SHA-256 for each path (or `None` for a new file),
+and validation commands from the existing fixed allowlist.
+
+This bridge applies already-proposed contents; it does not generate edits,
+invoke an AI model, or integrate the Continue runtime. Its path grant and
+filesystem checks are not an OS sandbox and cannot prevent hostile concurrent
+path swaps. Cancellation is cooperative and cannot interrupt a synchronous
+write or validation process already in progress; it checks cancellation before
+committing a staged file replacement. Each file is staged in its destination
+directory and installed with `os.replace`. On Windows, the existing target
+DACL is copied to the staging file with native security APIs; this does not
+establish owner, group, SACL, or all ACL-inheritance behavior. A multi-file
+request is not a transaction. Report these boundaries and the actual
+structured edit, observation, and validation outcomes.
+
 ### 6. Test
 
 Use the smallest available validation command that checks the changed behavior.
@@ -222,3 +243,25 @@ A suitable completion statement is:
 "Implemented the requested change in the smallest workable scope, verified the relevant repository checks that were available, and reported the exact commands executed, the PASS/FAIL/SKIPPED status of each check, and the remaining limitations or blockers."
 
 This phrasing remains valid only when the evidence supports it.
+
+### Verification handoff
+
+When the task has an assigned verifier, provide a handoff that lets them
+reproduce the agreed acceptance checks without reconstructing missing context.
+Include:
+
+- the baseline commit and relevant repository state
+- the task objective, authorized scope, exclusions, and acceptance criteria
+- changed paths and a concise change summary
+- exact validation commands, environment details relevant to reproduction,
+  exit outcomes, and the checks each command covers
+- failures, skipped or unavailable checks, limitations, and any known
+  follow-up needed to interpret the evidence
+
+Keep the implementer's test results separate from the verifier's findings.
+Do not label self-review as independent verification, infer a verifier's
+authority or independence criteria, or claim approval or release from a
+successful handoff. If no verifier or accepted verification procedure is
+available, report verification as `NOT RUN` or `BLOCKED` with the reason.
+Pause if the handoff requires an unresolved owner decision, broader access, or
+a governed workflow that has not been explicitly authorized.
