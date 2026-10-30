@@ -13,7 +13,7 @@ describe('securityCheck', () => {
 
 URL: https://user:pass@example.com
 
-GitHub Token:[REDACTED_GITHUB_TOKEN_FOR_TESTING]
+GitHub Token: [REDACTED_GITHUB_TOKEN_FOR_TESTING]
 
 SendGrid: "SG.APhb3zgjtx3hajdas1TjBB.H7Sgbba3afgKSDyB442aDK0kpGO3SD332313-L5528Kewhere"
 
