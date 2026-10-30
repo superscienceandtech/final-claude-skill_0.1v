@@ -1,73 +1,111 @@
-<!-- OMC:START -->
-<!-- OMC:VERSION:5.5.0 -->
+# Claude Cookbooks
 
-# oh-my-claudecode - Intelligent Multi-Agent Orchestration
+A collection of Jupyter notebooks and Python examples for building with the Claude API.
 
-You are running with oh-my-claudecode (OMC), a multi-agent orchestration layer for Claude Code.
-Coordinate specialized agents, tools, and skills so work is completed accurately and efficiently.
+## Quick Start
 
-<operating_principles>
-- Delegate specialized work to the most appropriate agent.
-- Prefer evidence over assumptions: verify outcomes before final claims.
-- Choose the lightest-weight path that preserves quality.
-- Consult official docs before implementing with SDKs/frameworks/APIs.
-</operating_principles>
+```bash
+# Install dependencies
+uv sync --all-extras
 
-<delegation_rules>
-Delegate for: multi-file changes, refactors, debugging, reviews, planning, research, verification.
-Work directly for: trivial ops, small clarifications, single commands.
-Route code to `executor` (use `model=opus` for complex work). Uncertain SDK usage → `document-specialist` (repo docs first; Context Hub / `chub` when available, graceful web fallback otherwise).
-</delegation_rules>
+# Install pre-commit hooks
+uv run pre-commit install
 
-<model_routing>
-`haiku` (quick lookups), `sonnet` (standard), `opus` (architecture, deep analysis), `fable` (Claude Fable 5, above Opus).
-The session model set via `/model` governs the main loop only; delegated agents run on their pinned tier unless you pass `model` explicitly or set a per-agent `agents.<name>.model` override.
-Direct writes OK for: `~/.claude/**`, `.omc/**`, `.claude/**`, `CLAUDE.md`, `AGENTS.md`.
-</model_routing>
+# Set up API key
+cp .env.example .env
+# Edit .env and add your ANTHROPIC_API_KEY
+```
 
-<skills>
-Invoke via `/oh-my-claudecode:<name>`. Trigger patterns auto-detect keywords.
-**Canonical workflows (Tier-0):** `plan` → `execute` → `review` → `verify`. Roles: `planner` → `executor` → `reviewer` → `verifier`. `deep-interview` and `ralplan` are independent Tier-0 planning workflows. `research` and `team` are internal lanes; `autopilot`, `autoresearch`, `ralph`, and `ultragoal` remain directly invocable.
-**Retired in 5.0.0 (removed, not aliased):** `ultrawork`, `ultraqa`, `ultrapilot`, `swarm`, `pipeline`, `merge-readiness`, `deep-dive`, `sciomc`, `ccg`, `omc-teams`, `setup`, `mcp-setup`, `omc-reference`, `learner`, `writer-memory`, `local-build-reminder`. Use `execute`, `verify`, `review`, `research`, `omc-setup`, `wiki`, `remember`, or `team` instead.
-Keyword triggers: `"autopilot"→autopilot`, `"ralplan"→ralplan`, `"deep interview"→deep-interview`, `"deslop"`/`"anti-slop"`→ai-slop-cleaner (→`review`, opt-in), `"deep-analyze"`→analysis mode, `"tdd"`→TDD mode, `"deepsearch"`→codebase search, `"ultrathink"`→deep reasoning, `"cancelomc"`→cancel. Team orchestration is explicit via `/team`.
-Release is maintainer-only `omc release` (see Migration Guide); `/release` remains a compatibility alias and never bypasses the release boundary.
-Detailed agent catalog, tools, team pipeline, commit protocol, and full skill registry live in the `wiki` skill when skills are available, including reference for `explore`, `planner`, `architect`, `executor`, `designer`, and `writer`; this file remains sufficient without skill support. Specialists remain internal/routable modules (document-specialist, test-engineer, designer, etc.) — not Tier-0 workflows.
-</skills>
+## Development Commands
 
-<verification>
-Verify before claiming completion. Size appropriately: small→haiku, standard→sonnet, large/security→opus.
-If verification fails, keep iterating.
-</verification>
+```bash
+make format        # Format code with ruff
+make lint          # Run linting
+make check         # Run format-check + lint
+make fix           # Auto-fix issues + format
+make test          # Run pytest
+```
 
-<failure_mode_guards>
-User input: when clarification, preference, or approval is required and AskUserQuestion is available, use AskUserQuestion instead of ending with a prose question; ask one focused question with 2-4 options. Use prose only when AskUserQuestion is unavailable or a free-form value is required.
-Session/worktree continuity: before editing after resume/compaction or inside a linked worktree, re-check `git status --short --branch`, current cwd, and relevant `.omc/state/` or `.omc/handoffs/` artifacts so work does not continue on the wrong branch or stale context.
-No fake completion: TODO-style placeholder notes, `test.skip`/`.only`, stub tests, and unimplemented branches are blockers, not evidence. Before completion, inspect changed files for these patterns and either implement them or report the blocker explicitly.
-</failure_mode_guards>
+Or directly with uv:
 
-<execution_protocols>
-Broad requests: explore first, then plan. 2+ independent tasks in parallel. `run_in_background` for builds/tests.
-Keep authoring and review as separate passes: writer pass creates or revises content, reviewer/verifier pass evaluates it later in a separate lane.
-Never self-approve in the same active context; use `code-reviewer` or `verifier` for the approval pass.
-Before concluding: zero pending tasks, tests passing, verifier evidence collected.
-</execution_protocols>
+```bash
+uv run ruff format .           # Format
+uv run ruff check .            # Lint
+uv run ruff check --fix .      # Auto-fix
+uv run pre-commit run --all-files
+```
 
-<hooks_and_context>
-Hooks inject `<system-reminder>` tags. Key patterns: `hook success: Success` (proceed), `[MAGIC KEYWORD: ...]` (invoke skill), `The boulder never stops` (continuation mode active).
-Persistence: `<remember>` (7 days), `<remember priority>` (permanent).
-Kill switches: `DISABLE_OMC`, `OMC_SKIP_HOOKS` (comma-separated).
-</hooks_and_context>
+## Code Style
 
-<cancellation>
-`/oh-my-claudecode:cancel` ends execution modes. Cancel when done+verified or blocked. Don't cancel if work incomplete.
-</cancellation>
+- **Line length:** 100 characters
+- **Quotes:** Double quotes
+- **Formatter:** Ruff
 
-<worktree_paths>
-State root: `.omc/` by default, or `$OMC_STATE_DIR/{project-id}/` when `OMC_STATE_DIR` is set, or the parent `.omc/` when a `.omc-workspace` marker anchors a multi-repo workspace. Runtime state includes `.omc/state/`, `.omc/state/sessions/{sessionId}/`, `.omc/notepad.md`, `.omc/project-memory.json`, `.omc/plans/`, `.omc/research/`, `.omc/logs/`, `.omc/artifacts/`, `.omc/handoffs/`, and `.omc/ultragoal/`. These are ignored operational artifacts by default; `.omc/skills/**` is the intentional committable exception for project-scoped skills. In linked git worktrees, local `.omc/` state is removed with the worktree unless centralized via `OMC_STATE_DIR`.
-</worktree_paths>
+Notebooks have relaxed rules for mid-file imports (E402), redefinitions (F811), and variable naming (N803, N806).
 
-## Setup
+## Git Workflow
 
-Say "setup omc" or run `/oh-my-claudecode:omc-setup`.
+**Branch naming:** `<username>/<feature-description>`
 
-<!-- OMC:END -->
+**Commit format (conventional commits):**
+```
+feat(scope): add new feature
+fix(scope): fix bug
+docs(scope): update documentation
+style: lint/format
+```
+
+## Key Rules
+
+1. **API Keys:** Never commit `.env` files. Use `dotenv.load_dotenv()` then access keys via `os.environ` or `os.getenv()`
+
+2. **Dependencies:** Use `uv add <package>` or `uv add --dev <package>`. Never edit pyproject.toml directly.
+
+3. **Models:** Use current Claude models. Check docs.anthropic.com for latest versions.
+   - Sonnet: `claude-sonnet-5`
+   - Haiku: `claude-haiku-4-5`
+   - Opus: `claude-opus-4-8`
+   - **Never use dated model IDs** (e.g., `claude-sonnet-4-6-20250514`). Always use the non-dated alias.
+   - **Bedrock model IDs** follow a different format. Use the base Bedrock model ID from the docs:
+     - Opus 4.8: `anthropic.claude-opus-4-8`
+     - Sonnet 5: `anthropic.claude-sonnet-5`
+     - Haiku 4.5: `anthropic.claude-haiku-4-5-20251001-v1:0`
+     - Prepend `global.` for global endpoints (recommended): `global.anthropic.claude-opus-4-8`
+     - Note: older Bedrock models use a dated `-YYYYMMDD-v1:0` suffix (e.g., Haiku 4.5 above); newer ones use the suffix-less `anthropic.claude-<model>` format.
+
+4. **Notebooks:**
+   - Keep outputs in notebooks (intentional for demonstration)
+   - One concept per notebook
+   - Test that notebooks run top-to-bottom without errors
+
+5. **Quality checks:** Run `make check` before committing. Pre-commit hooks validate formatting and notebook structure.
+
+## Slash Commands
+
+These commands are available in Claude Code and CI:
+
+- `/notebook-review` - Review notebook quality
+- `/model-check` - Validate Claude model references
+- `/link-review` - Check links in changed files
+
+## Project Structure
+
+```
+capabilities/      # Core Claude capabilities (RAG, classification, etc.)
+evals/             # Model evaluation patterns and benchmarks
+skills/            # Advanced skill-based notebooks
+tool_use/          # Tool use and integration patterns
+multimodal/        # Vision and image processing
+misc/              # Batch processing, caching, utilities
+third_party/       # Pinecone, Voyage, Wikipedia integrations
+extended_thinking/ # Extended reasoning patterns
+scripts/           # Validation scripts
+.claude/           # Claude Code commands and skills
+```
+
+## Adding a New Cookbook
+
+1. Create notebook in the appropriate directory
+2. Add entry to `registry.yaml` with title, description, path, authors, categories
+3. Add author info to `authors.yaml` if new contributor
+4. Run quality checks and submit PR
