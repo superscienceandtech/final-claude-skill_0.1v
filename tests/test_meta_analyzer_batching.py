@@ -1,0 +1,353 @@
+# Copyright 2026 Cisco Systems, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Regression tests for output-budgeted meta-analysis batching."""
+
+import json
+import logging
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from skill_scanner.core.analyzers.meta_analyzer import (
+    MetaAnalysisContextWindowError,
+    MetaAnalysisTruncatedError,
+    MetaAnalyzer,
+    _meta_evidence_id,
+    apply_meta_analysis_to_results,
+)
+from skill_scanner.core.models import Finding, Severity, Skill, ThreatCategory
+
+
+def _finding(index: int) -> Finding:
+    return Finding(
+        id=f"finding-{index}",
+        rule_id="TEST_RULE",
+        category=ThreatCategory.POLICY_VIOLATION,
+        severity=Severity.HIGH,
+        title=f"Finding {index}",
+        description="Potentially unsafe behavior",
+        analyzer="static",
+    )
+
+
+def _findings(count: int) -> list[Finding]:
+    return [_finding(index) for index in range(count)]
+
+
+def _skill() -> MagicMock:
+    skill = MagicMock(spec=Skill)
+    skill.name = "batch-test"
+    skill.description = "Meta-analysis batching fixture"
+    return skill
+
+
+def _prompt_indices(user_prompt: str) -> list[int]:
+    findings_section = user_prompt.split("### Findings from Analyzers", maxsplit=1)[1]
+    payload = findings_section.split("```json\n", maxsplit=1)[1].split("\n```", maxsplit=1)[0]
+    return [item["_index"] for item in json.loads(payload)]
+
+
+def _classification(indices: list[int], *, alternate_false_positives: bool = False) -> str:
+    validated = []
+    false_positives = []
+    for index in indices:
+        evidence_ids = [_meta_evidence_id(_finding(index))]
+        if alternate_false_positives and index % 2:
+            false_positives.append(
+                {
+                    "_index": index,
+                    "false_positive_reason": "Benign fixture",
+                    "evidence_ids": evidence_ids,
+                }
+            )
+        else:
+            validated.append(
+                {
+                    "_index": index,
+                    "confidence": "HIGH",
+                    "confidence_reason": "Test classification",
+                    "exploitability": "Low",
+                    "impact": "Low",
+                    "evidence_ids": evidence_ids,
+                    "chain": None,
+                }
+            )
+    return json.dumps(
+        {
+            "overall_risk_assessment": {
+                "risk_level": "MEDIUM",
+                "summary": "Test assessment",
+                "top_priority": "Review the retained findings.",
+                "skill_verdict": "SUSPICIOUS",
+                "verdict_reasoning": "The supplied evidence supports the classifications.",
+                "meta_delta": "FALSE_POSITIVE_SUPPRESSED" if false_positives else "NONE_SUPPORTED",
+            },
+            "validated_findings": validated,
+            "false_positives": false_positives,
+            "missed_threats": [],
+            "priority_order": indices,
+            "correlations": [],
+            "recommendations": [],
+        }
+    )
+
+
+def _response(content: str, *, finish_reason: str, input_tokens: int, output_tokens: int) -> MagicMock:
+    response = MagicMock()
+    response.choices = [MagicMock(message=MagicMock(content=content), finish_reason=finish_reason)]
+    response.usage = MagicMock(
+        prompt_tokens=input_tokens,
+        completion_tokens=output_tokens,
+        total_tokens=input_tokens + output_tokens,
+    )
+    return response
+
+
+@pytest.mark.asyncio
+async def test_hundreds_of_findings_are_batched_with_global_indices() -> None:
+    analyzer = MetaAnalyzer(model="test-model", api_key="test-key", max_tokens=8192)
+    analyzer._build_skill_context = MagicMock(return_value=("bounded context", []))
+    findings = _findings(257)
+    batches: list[list[int]] = []
+
+    async def classify(_system_prompt: str, user_prompt: str) -> str:
+        indices = _prompt_indices(user_prompt)
+        batches.append(indices)
+        return _classification(indices, alternate_false_positives=True)
+
+    analyzer._make_llm_request = AsyncMock(side_effect=classify)
+
+    result = await analyzer.analyze_with_findings(_skill(), findings, ["static"])
+
+    assert len(batches) > 1
+    assert all(len(batch) <= analyzer._max_findings_per_batch() for batch in batches)
+    assert [index for batch in batches for index in batch] == list(range(257))
+
+    classified_indices = [item["_index"] for item in result.validated_findings + result.false_positives]
+    assert len(classified_indices) == 257
+    assert len(set(classified_indices)) == 257
+    assert sorted(classified_indices) == list(range(257))
+    assert result.analysis_warnings == []
+
+
+@pytest.mark.asyncio
+async def test_malformed_response_degrades_only_its_batch_without_resending() -> None:
+    # 320 * .75 / 80 = three findings per batch.
+    analyzer = MetaAnalyzer(model="test-model", api_key="test-key", max_tokens=320)
+    analyzer._build_skill_context = MagicMock(return_value=("bounded context", []))
+    findings = _findings(9)
+    calls: list[list[int]] = []
+
+    async def classify(_system_prompt: str, user_prompt: str) -> str:
+        indices = _prompt_indices(user_prompt)
+        calls.append(indices)
+        if indices == [3, 4, 5]:
+            return '{"validated_findings": ['
+        return _classification(indices, alternate_false_positives=True)
+
+    analyzer._make_llm_request = AsyncMock(side_effect=classify)
+
+    result = await analyzer.analyze_with_findings(_skill(), findings, ["static"])
+
+    assert calls == [[0, 1, 2], [3, 4, 5], [6, 7, 8]]
+    classified_indices = [item["_index"] for item in result.validated_findings + result.false_positives]
+    assert sorted(classified_indices) == list(range(9))
+    assert len(classified_indices) == len(set(classified_indices))
+
+    degraded = {item["_index"] for item in result.validated_findings if item.get("meta_analysis_degraded")}
+    assert degraded == {3, 4, 5}
+    assert [warning["code"] for warning in result.analysis_warnings] == ["META_BATCH_PARSE_FAILED"]
+    assert result.overall_risk_assessment["risk_level"] == "UNKNOWN"
+    assert result.overall_risk_assessment["skill_verdict"] == "UNKNOWN"
+    assert result.overall_risk_assessment["partial_risk_level"] == "MEDIUM"
+    assert result.overall_risk_assessment["partial_skill_verdict"] == "SUSPICIOUS"
+    assert result.overall_risk_assessment["partial_summary"] == "Test assessment"
+    assert "incomplete" in result.overall_risk_assessment["summary"].lower()
+    assert result.overall_risk_assessment["meta_analysis_status"] == "degraded"
+    assert result.overall_risk_assessment["meta_analysis_warnings"] == result.analysis_warnings
+    applied = apply_meta_analysis_to_results(findings, result, _skill())
+    assert all(applied[index].metadata["meta_analysis_degraded"] is True for index in (3, 4, 5))
+    assert all(applied[index].metadata["meta_validated"] is False for index in (3, 4, 5))
+
+
+@pytest.mark.asyncio
+async def test_length_finish_reason_bisects_batch_and_aggregates_all_usage() -> None:
+    # 640 * .75 / 80 = six findings: one initial batch, then two halves.
+    analyzer = MetaAnalyzer(model="test-model", api_key="test-key", max_tokens=640)
+    analyzer._build_skill_context = MagicMock(return_value=("bounded context", []))
+    findings = _findings(6)
+    calls: list[list[int]] = []
+
+    async def complete(**kwargs):
+        indices = _prompt_indices(kwargs["messages"][1]["content"])
+        calls.append(indices)
+        if len(calls) == 1:
+            return _response("truncated", finish_reason="length", input_tokens=100, output_tokens=640)
+        return _response(
+            _classification(indices),
+            finish_reason="stop",
+            input_tokens=50,
+            output_tokens=30,
+        )
+
+    with patch("skill_scanner.core.analyzers.meta_analyzer.acompletion", new=AsyncMock(side_effect=complete)):
+        result = await analyzer.analyze_with_findings(_skill(), findings, ["static"])
+
+    assert calls == [[0, 1, 2, 3, 4, 5], [0, 1, 2], [3, 4, 5]]
+    assert [item["_index"] for item in result.validated_findings] == list(range(6))
+    assert result.analysis_warnings == []
+    assert analyzer.llm_usage == {
+        "input_tokens": 200,
+        "output_tokens": 700,
+        "total_tokens": 900,
+    }
+
+
+@pytest.mark.asyncio
+async def test_apple_fm_context_window_bisects_and_stops_at_one_finding(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SKILL_SCANNER_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("SKILL_SCANNER_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("SKILL_SCANNER_META_LLM_API_KEY", raising=False)
+    # CI runners never have apple-fm-sdk; the analyzer checks for it when built.
+    monkeypatch.setattr("skill_scanner.core.analyzers.apple_fm.require_apple_fm_sdk", lambda: None)
+    analyzer = MetaAnalyzer(model="apple-fm/system", max_tokens=8192)
+    analyzer._build_skill_context = MagicMock(return_value=("bounded context", []))
+    findings = _findings(2)
+    calls: list[list[int]] = []
+
+    async def classify(_system_prompt: str, user_prompt: str) -> str:
+        indices = _prompt_indices(user_prompt)
+        calls.append(list(indices))
+        if indices == [0]:
+            return _classification(indices)
+        raise MetaAnalysisContextWindowError("context window cannot fit this prompt")
+
+    analyzer._make_llm_request = AsyncMock(side_effect=classify)
+
+    result = await analyzer.analyze_with_findings(_skill(), findings, ["static"])
+
+    assert calls == [[0, 1], [0], [1]]
+    assert [item["_index"] for item in result.validated_findings if not item.get("meta_analysis_degraded")] == [0]
+    degraded = {item["_index"] for item in result.validated_findings if item.get("meta_analysis_degraded")}
+    assert degraded == {1}
+    assert [warning["code"] for warning in result.analysis_warnings] == ["META_BATCH_CONTEXT_WINDOW"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("finish_reason", "native_finish_reason"),
+    [
+        ("length", None),
+        ("max_tokens", None),
+        ("MAX_TOKENS", None),
+        ("stop", "max_tokens"),
+        ("stop", "MAX_TOKENS"),
+        ("stop", "max_output_tokens"),
+    ],
+)
+async def test_provider_token_limit_finish_reasons_trigger_bisection(
+    finish_reason: str,
+    native_finish_reason: str | None,
+) -> None:
+    analyzer = MetaAnalyzer(model="test-model", api_key="test-key")
+    response = _response("truncated", finish_reason=finish_reason, input_tokens=10, output_tokens=20)
+    response.choices[0].provider_specific_fields = (
+        {"native_finish_reason": native_finish_reason} if native_finish_reason else {}
+    )
+
+    with (
+        patch("skill_scanner.core.analyzers.meta_analyzer.acompletion", new=AsyncMock(return_value=response)),
+        pytest.raises(MetaAnalysisTruncatedError),
+    ):
+        await analyzer._make_llm_request("system", "user")
+
+    assert analyzer.llm_usage == {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}
+
+
+@pytest.mark.asyncio
+async def test_parseable_index_only_batch_is_retained_as_degraded() -> None:
+    analyzer = MetaAnalyzer(model="test-model", api_key="test-key", max_tokens=320)
+    analyzer._build_skill_context = MagicMock(return_value=("bounded context", []))
+    findings = _findings(3)
+
+    response = json.loads(_classification([0, 1, 2]))
+    response["validated_findings"] = []
+    response["false_positives"] = [{"_index": index} for index in range(3)]
+    response["overall_risk_assessment"]["meta_delta"] = "FALSE_POSITIVE_SUPPRESSED"
+    analyzer._make_llm_request = AsyncMock(return_value=json.dumps(response))
+
+    result = await analyzer.analyze_with_findings(_skill(), findings, ["static"])
+
+    classified_indices = [item["_index"] for item in result.validated_findings + result.false_positives]
+    assert sorted(classified_indices) == [0, 1, 2]
+    assert len(classified_indices) == len(set(classified_indices))
+    assert result.false_positives == []
+    assert all(item["meta_analysis_degraded"] is True for item in result.validated_findings)
+    assert result.analysis_warnings[0]["code"] == "META_BATCH_PARSE_FAILED"
+    assert analyzer._make_llm_request.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_ranking_omitting_false_positives_still_suppresses_them() -> None:
+    """A ranking that lists only the findings that survived is not a parse failure.
+
+    `priority_order` ranks what the model kept, so omitting a suppressed index is
+    a defensible reading of the contract. Treating it as malformed would degrade
+    the batch and retain every finding in it, false positives included.
+    """
+    analyzer = MetaAnalyzer(model="test-model", api_key="test-key", max_tokens=320)
+    analyzer._build_skill_context = MagicMock(return_value=("bounded context", []))
+    findings = _findings(3)
+
+    response = json.loads(_classification([0, 1, 2], alternate_false_positives=True))
+    # Index 1 is the false positive; the ranking covers the retained findings only.
+    response["priority_order"] = [item["_index"] for item in response["validated_findings"]]
+    analyzer._make_llm_request = AsyncMock(return_value=json.dumps(response))
+
+    result = await analyzer.analyze_with_findings(_skill(), findings, ["static"])
+
+    assert [item["_index"] for item in result.false_positives] == [1]
+    assert [item["_index"] for item in result.validated_findings] == [0, 2]
+    assert not any(item.get("meta_analysis_degraded") for item in result.validated_findings)
+    assert result.priority_order == [0, 2]
+    assert result.analysis_warnings == []
+    assert result.overall_risk_assessment["risk_level"] == "MEDIUM"
+
+
+@pytest.mark.asyncio
+async def test_unusable_ranking_is_normalized_without_degrading_the_batch(caplog: pytest.LogCaptureFixture) -> None:
+    """Duplicate, out-of-batch, non-integer, and missing ranks are all repaired."""
+    analyzer = MetaAnalyzer(model="test-model", api_key="test-key", max_tokens=320)
+    analyzer._build_skill_context = MagicMock(return_value=("bounded context", []))
+    findings = _findings(3)
+
+    response = json.loads(_classification([0, 1, 2]))
+    response["priority_order"] = [2, 2, 99, "0"]
+    analyzer._make_llm_request = AsyncMock(return_value=json.dumps(response))
+
+    with caplog.at_level(logging.WARNING, logger="skill_scanner.core.analyzers.meta_analyzer"):
+        result = await analyzer.analyze_with_findings(_skill(), findings, ["static"])
+
+    # Model order first, then the validated indices it never ranked.
+    assert result.priority_order == [2, 0, 1]
+    assert [item["_index"] for item in result.validated_findings] == [0, 1, 2]
+    assert not any(item.get("meta_analysis_degraded") for item in result.validated_findings)
+    # Logged, but not an analysis warning: a cosmetic field must not force the
+    # skill-level risk_level and verdict to UNKNOWN.
+    assert result.analysis_warnings == []
+    assert result.overall_risk_assessment["risk_level"] == "MEDIUM"
+    assert "unusable priority ranking" in caplog.text

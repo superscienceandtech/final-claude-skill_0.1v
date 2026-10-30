@@ -1,0 +1,1524 @@
+# Copyright 2026 Cisco Systems, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Command-line interface for the Skill Scanner."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+import os
+import re
+import sys
+import traceback
+from collections.abc import Callable
+from pathlib import Path
+
+from rich.console import Console
+from rich.markdown import Markdown
+
+from .. import __version__
+from ..core.analyzer_factory import LLM_CONFIGURATION_HINT, AnalyzerConfigurationError, build_analyzers
+from ..core.cel.models import CelMode
+from ..core.finding_taxonomy import refresh_taxonomy_scan_metadata
+from ..core.loader import SkillLoadError
+from ..core.reporters.html_reporter import HTMLReporter
+from ..core.reporters.json_reporter import JSONReporter
+from ..core.reporters.markdown_reporter import MarkdownReporter
+from ..core.reporters.sarif_reporter import SARIFReporter
+from ..core.reporters.table_reporter import TableReporter
+from ..core.scan_policy import ScanPolicy
+from ..core.scanner import SkillScanner
+from ..llm_reasoning import LLM_REASONING_EFFORT_VALUES, ReasoningConfigurationError
+from ..llm_token_options import resolve_llm_max_tokens
+
+# Optional LLM analyzer (needed only for LLM_AVAILABLE check)
+LLMAnalyzer: type | None
+try:
+    from ..core.analyzers.llm_analyzer import LLMAnalyzer  # noqa: F401
+
+    LLM_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    LLM_AVAILABLE = False
+    LLMAnalyzer = None
+
+# Optional Meta analyzer
+MetaAnalyzer: type | None
+apply_meta_analysis_to_results: Callable[..., list] | None
+merge_meta_analyzer_usage: Callable[..., None] | None
+try:
+    from ..core.analyzers.meta_analyzer import (
+        MetaAnalyzer,
+        apply_meta_analysis_to_results,
+        merge_meta_analyzer_usage,
+    )
+
+    META_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    META_AVAILABLE = False
+    MetaAnalyzer = None
+    apply_meta_analysis_to_results = None
+    merge_meta_analyzer_usage = None
+
+logger = logging.getLogger("skill_scanner.cli")
+
+# Exit codes: 1 means findings at or above --fail-on-severity (or a scan error);
+# 2 means the scan could not be configured as requested (bad policy, an
+# analyzer that was asked for but could not be built), as argparse uses for
+# usage errors.
+EXIT_CONFIGURATION_ERROR = 2
+
+_STATUS_MESSAGE_MAX_CHARS = 4096
+_STATUS_REDACTION = "<redacted>"
+_STATUS_MESSAGE_OMITTED = "[status message omitted: exceeds safe length]"
+
+# Status callbacks receive text from several optional integrations.  Keep the
+# patterns deliberately bounded and limited to high-confidence credential
+# forms so ordinary model names, paths, and progress messages remain intact.
+_STATUS_LABELED_SECRET_RE = re.compile(
+    r"(?i)(?P<prefix>(?<![A-Za-z0-9])(?:api[-_ ]?key|access[-_ ]?key(?:[-_ ]?id)?|access[-_ ]?token|"
+    r"auth(?:orization)?[-_ ]?token|bearer[-_ ]?token|client[-_ ]?secret|"
+    r"password|passwd|pwd|private[-_ ]?key|secret(?:[-_ ]?key)?|token|credentials?)\b\s*[:=]\s*)"
+    r"(?P<value>\"[^\"\r\n]{1,1024}\"|'[^'\r\n]{1,1024}'|[^\s,;&#]{1,1024})"
+)
+_STATUS_BEARER_SECRET_RE = re.compile(
+    r"(?i)(?P<prefix>\b(?:authorization\s*[:=]\s*)?(?:bearer|basic)\s+)"
+    r"(?P<value>[A-Za-z0-9._~+/=-]{8,1024})"
+)
+_STATUS_URL_USERINFO_RE = re.compile(
+    r"(?P<prefix>\b[a-zA-Z][a-zA-Z0-9+.-]{1,15}://[^/@\s:]{1,128}:)"
+    r"(?P<value>[^@/\s]{1,512})(?P<suffix>@)"
+)
+_STATUS_URL_TOKEN_USERINFO_RE = re.compile(
+    r"(?P<prefix>\b[a-zA-Z][a-zA-Z0-9+.-]{1,15}://)"
+    r"(?P<value>[^/@\s:]{8,512})(?P<suffix>@)"
+)
+_STATUS_QUERY_SECRET_RE = re.compile(
+    r"(?i)(?P<prefix>[?&#](?:api[-_]?key|access[-_]?token|auth[-_]?token|"
+    r"password|secret|token)=)(?P<value>[^&#\s]{1,1024})"
+)
+_STATUS_PROVIDER_SECRET_RE = re.compile(
+    r"\b(?:"
+    r"AKIA[0-9A-Z]{16}"
+    r"|AIza[0-9A-Za-z_-]{35}"
+    r"|gh[pousr]_[A-Za-z0-9]{20,255}"
+    r"|github_pat_[A-Za-z0-9_]{20,255}"
+    r"|hf_[A-Za-z0-9]{20,255}"
+    r"|glpat-[A-Za-z0-9_-]{20,255}"
+    r"|npm_[A-Za-z0-9]{20,255}"
+    r"|pypi-[A-Za-z0-9_-]{20,255}"
+    r"|sk-(?:proj-)?[A-Za-z0-9_-]{20,255}"
+    r"|xox[baprs]-[A-Za-z0-9-]{10,255}"
+    r"|(?:sk|rk)_live_[A-Za-z0-9]{12,255}"
+    r")\b"
+)
+_STATUS_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b")
+_STATUS_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?"
+    r"(?:-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----|$)"
+)
+
+
+def _replace_status_secret(match: re.Match[str]) -> str:
+    """Replace a named secret while retaining safe surrounding syntax."""
+    value = match.group("value")
+    replacement = _STATUS_REDACTION
+    if len(value) >= 2 and value[0] in {'"', "'"} and value[-1] == value[0]:
+        replacement = f"{value[0]}{_STATUS_REDACTION}{value[0]}"
+    return f"{match.group('prefix')}{replacement}{match.groupdict().get('suffix', '')}"
+
+
+def _redact_status_message(message: str) -> str:
+    """Return a bounded status message with credential values removed.
+
+    Oversized messages are omitted wholesale rather than truncating through a
+    credential and exposing a partial value.  All substitutions use bounded,
+    non-recursive regular expressions over an already bounded input.
+    """
+    if len(message) > _STATUS_MESSAGE_MAX_CHARS:
+        return _STATUS_MESSAGE_OMITTED
+
+    redacted = _STATUS_PRIVATE_KEY_RE.sub(_STATUS_REDACTION, message)
+    for pattern in (
+        _STATUS_URL_USERINFO_RE,
+        _STATUS_URL_TOKEN_USERINFO_RE,
+        _STATUS_QUERY_SECRET_RE,
+        _STATUS_BEARER_SECRET_RE,
+        _STATUS_LABELED_SECRET_RE,
+    ):
+        redacted = pattern.sub(_replace_status_secret, redacted)
+    redacted = _STATUS_PROVIDER_SECRET_RE.sub(_STATUS_REDACTION, redacted)
+    redacted = _STATUS_JWT_RE.sub(_STATUS_REDACTION, redacted)
+    safe_message = "".join(
+        char if char.isprintable() else char.encode("unicode_escape").decode("ascii") for char in redacted
+    )
+    if len(safe_message) > _STATUS_MESSAGE_MAX_CHARS:
+        return _STATUS_MESSAGE_OMITTED
+    return safe_message
+
+
+def _print_cli_error(prefix: str, error: BaseException, *, include_traceback: bool = False) -> None:
+    """Print an exception without reflecting credentials or terminal controls."""
+    print(f"{prefix}{_redact_status_message(str(error))}", file=sys.stderr)
+    if include_traceback:
+        print(_redact_status_message(traceback.format_exc()), file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+
+def _positive_int(value: str) -> int:
+    """Argparse type that rejects zero and negative integer values."""
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def _load_policy(args: argparse.Namespace) -> ScanPolicy:
+    """Load scan policy from ``--policy`` flag or return the default."""
+    policy_value = getattr(args, "policy", None)
+
+    if policy_value:
+        presets = ScanPolicy.preset_names()
+        if policy_value.lower() in presets:
+            policy = ScanPolicy.from_preset(policy_value)
+            logger.info("Using %s scan policy (preset)", policy.policy_name)
+        else:
+            try:
+                policy = ScanPolicy.from_yaml(policy_value)
+                logger.info("Using scan policy: %s (%s)", policy_value, policy.policy_name)
+            except FileNotFoundError:
+                print(
+                    f"Error: Policy file not found: {_redact_status_message(str(policy_value))}. "
+                    f"Presets: {', '.join(ScanPolicy.preset_names())}",
+                    file=sys.stderr,
+                )
+                sys.exit(EXIT_CONFIGURATION_ERROR)
+            except Exception as e:
+                _print_cli_error("Error loading policy file: ", e)
+                sys.exit(EXIT_CONFIGURATION_ERROR)
+    else:
+        policy = ScanPolicy.default()
+
+    cel_mode = getattr(args, "cel_mode", None)
+    if cel_mode is not None:
+        policy.cel.mode = CelMode(cel_mode)
+        logger.info("Using CEL mode override: %s", policy.cel.mode.value)
+
+    # When --verbose is NOT set, disable per-finding metadata bloat
+    if not getattr(args, "verbose", False):
+        policy.finding_output.attach_policy_fingerprint = False
+        policy.finding_output.annotate_same_path_rule_cooccurrence = False
+
+    return policy
+
+
+def _trusted_rule_pack_paths(args: argparse.Namespace) -> list[Path]:
+    """Return validated administrator-trusted rule-pack directories."""
+    paths: list[Path] = []
+    for value in getattr(args, "trusted_rule_pack", None) or []:
+        path = Path(value).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(f"Trusted rule-pack path does not exist: {path}")
+        if not path.is_dir():
+            raise ValueError(f"Trusted rule-pack path is not a directory: {path}")
+        paths.append(path)
+    return paths
+
+
+def _build_rule_registry(
+    args: argparse.Namespace,
+    status: Callable[[str], None],
+):
+    """Strictly validate bundled and trusted packs before scanner startup."""
+    trusted_dirs = _trusted_rule_pack_paths(args)
+
+    from ..core.rule_registry import PackLoader
+
+    registry_dirs: list[Path | str] = [*trusted_dirs]
+    registry = PackLoader().build_registry(trusted_dirs=registry_dirs)
+    if trusted_dirs:
+        # Do not echo administrator-supplied paths: directory names can contain
+        # credentials, and the paths add no value after successful validation.
+        status("Loaded trusted rule pack configuration")
+    return registry
+
+
+def _create_skill_scanner(
+    analyzers: list,
+    policy: ScanPolicy,
+    args: argparse.Namespace,
+    status: Callable[[str], None],
+) -> SkillScanner:
+    """Create a scanner with any explicitly trusted pack registry attached."""
+    rule_registry = _build_rule_registry(args, status)
+    return SkillScanner(analyzers=analyzers, policy=policy, rule_registry=rule_registry)
+
+
+def _build_analyzers(policy: ScanPolicy, args: argparse.Namespace, status: Callable[[str], None]) -> list:
+    """Build the full analyzer list from *policy* and CLI *args*.
+
+    Delegates to the centralized :func:`build_analyzers` factory so that
+    core analyzer construction is defined in exactly one place.
+    """
+    from ..data import resolve_rule_packs
+
+    extra_rules_dirs = None
+    pack_names: list[str] | None = getattr(args, "rule_packs", None)
+    if pack_names:
+        extra_rules_dirs = resolve_rule_packs(pack_names)
+        status(f"Loading additional rule packs: {', '.join(pack_names)}")
+
+    trusted_pack_dirs = _trusted_rule_pack_paths(args)
+    analyzers = build_analyzers(
+        policy,
+        custom_yara_rules_path=getattr(args, "custom_rules", None),
+        extra_rules_dirs=extra_rules_dirs,
+        trusted_pack_dirs=trusted_pack_dirs or None,
+        use_behavioral=getattr(args, "use_behavioral", False),
+        use_llm=getattr(args, "use_llm", False),
+        llm_decompose=getattr(args, "llm_decompose", False),
+        system_one_endpoint=getattr(args, "system_one_endpoint", None),
+        system_one_model=getattr(args, "system_one_model", None),
+        use_virustotal=getattr(args, "use_virustotal", False),
+        vt_api_key=getattr(args, "vt_api_key", None),
+        vt_upload_files=getattr(args, "vt_upload_files", False),
+        use_aidefense=getattr(args, "use_aidefense", False),
+        aidefense_api_key=getattr(args, "aidefense_api_key", None),
+        aidefense_api_url=getattr(args, "aidefense_api_url", None),
+        use_trigger=getattr(args, "use_trigger", False),
+        use_osv=getattr(args, "use_osv", False),
+        llm_provider=getattr(args, "llm_provider", None),
+        llm_consensus_runs=getattr(args, "llm_consensus_runs", 1),
+        llm_max_tokens=getattr(args, "llm_max_tokens", None),
+        llm_reasoning_effort=getattr(args, "llm_reasoning_effort", None),
+    )
+
+    # Emit status messages for the optional analyzers that were activated.
+    for a in analyzers:
+        name = a.get_name()
+        if name == "behavioral":
+            status("Using behavioral analyzer (static dataflow analysis)")
+        elif name == "llm":
+            status(f"Using LLM analyzer with model: {getattr(a, 'model', 'unknown')}")
+        elif name == "virustotal":
+            mode = "with file uploads" if getattr(a, "upload_files", False) else "hash-only mode"
+            status(f"Using VirusTotal binary file scanner ({mode})")
+        elif name == "aidefense":
+            status("Using AI Defense analyzer")
+        elif name == "trigger":
+            status("Using Trigger analyzer (description specificity analysis)")
+        elif name == "osv_analyzer":
+            status("Using OSV dependency vulnerability analyzer")
+
+    return analyzers
+
+
+def _build_meta_analyzer(
+    args: argparse.Namespace,
+    analyzer_count: int,
+    status: Callable[[str], None],
+    policy=None,
+    max_tokens: int | None = None,
+    reasoning_effort: str | None = None,
+):
+    """Optionally build a MetaAnalyzer if ``--enable-meta`` is set."""
+    if not getattr(args, "enable_meta", False):
+        return None
+
+    if not META_AVAILABLE or MetaAnalyzer is None:
+        raise AnalyzerConfigurationError("--enable-meta needs the LLM dependencies: pip install litellm")
+    if analyzer_count < 2:
+        logger.warning("Meta-analysis requires at least 2 analyzers.  Skipping.")
+        return None
+
+    try:
+        meta_api_key = os.getenv("SKILL_SCANNER_META_LLM_API_KEY") or os.getenv("SKILL_SCANNER_LLM_API_KEY")
+        meta_model = os.getenv("SKILL_SCANNER_META_LLM_MODEL") or os.getenv("SKILL_SCANNER_LLM_MODEL")
+        meta_base_url = os.getenv("SKILL_SCANNER_META_LLM_BASE_URL") or os.getenv("SKILL_SCANNER_LLM_BASE_URL")
+        meta_api_version = os.getenv("SKILL_SCANNER_META_LLM_API_VERSION") or os.getenv("SKILL_SCANNER_LLM_API_VERSION")
+        kwargs: dict = dict(
+            model=meta_model,
+            api_key=meta_api_key,
+            base_url=meta_base_url,
+            api_version=meta_api_version,
+            provider=getattr(args, "llm_provider", None),
+            reasoning_effort=reasoning_effort,
+            policy=policy,
+        )
+        effective_max_tokens = resolve_llm_max_tokens(
+            max_tokens,
+            meta=True,
+            default=policy.llm_analysis.max_output_tokens if policy else 8192,
+        )
+        kwargs["max_tokens"] = effective_max_tokens
+        meta = MetaAnalyzer(**kwargs)
+        status("Using Meta-Analyzer for false positive filtering and finding prioritization")
+        return meta
+    except ReasoningConfigurationError:
+        raise
+    except Exception as e:
+        raise AnalyzerConfigurationError(
+            f"the meta-analyzer could not be initialised: {e}. {LLM_CONFIGURATION_HINT}"
+        ) from e
+
+
+def _make_status_printer(args: argparse.Namespace) -> Callable[[str], None]:
+    """Return a redacting printer that preserves machine-readable stdout."""
+    formats = _get_formats(args)
+    is_machine = any(f in formats for f in ("json", "sarif"))
+
+    def _print(msg: str) -> None:
+        print(_redact_status_message(msg), file=sys.stderr if is_machine else sys.stdout)
+
+    return _print
+
+
+def _get_formats(args: argparse.Namespace) -> list[str]:
+    """Return the list of output formats from ``--format`` flags."""
+    raw = getattr(args, "format", None)
+    if not raw:
+        return ["summary"]
+    if isinstance(raw, list):
+        return raw
+    return [raw]
+
+
+def _format_single(fmt: str, args: argparse.Namespace, result_or_report) -> str:
+    """Generate the formatted output string for one format."""
+    if fmt == "json":
+        return JSONReporter(pretty=not args.compact).generate_report(result_or_report)
+    if fmt == "markdown":
+        return MarkdownReporter(detailed=args.detailed).generate_report(result_or_report)
+    if fmt == "table":
+        return TableReporter().generate_report(result_or_report)
+    if fmt == "sarif":
+        return SARIFReporter().generate_report(result_or_report)
+    if fmt == "html":
+        return HTMLReporter().generate_report(result_or_report)
+    # summary (default)
+    from ..core.models import Report
+
+    if isinstance(result_or_report, Report):
+        return _generate_multi_skill_summary(result_or_report)
+    return _generate_summary(result_or_report)
+
+
+def _format_output(args: argparse.Namespace, result_or_report) -> str:
+    """Generate the formatted output string for the primary format."""
+    formats = _get_formats(args)
+    return _format_single(formats[0], args, result_or_report)
+
+
+def _configure_taxonomy_and_threat_mapping(args: argparse.Namespace, status: Callable[[str], None]) -> None:
+    """Apply runtime taxonomy and threat-mapping overrides from CLI flags."""
+    from ..threats.cisco_ai_taxonomy import reload_taxonomy
+    from ..threats.threats import configure_threat_mappings
+
+    taxonomy_source = reload_taxonomy(getattr(args, "taxonomy", None))
+    threat_mapping_source = configure_threat_mappings(getattr(args, "threat_mapping", None))
+
+    if taxonomy_source != "builtin":
+        status(f"Using custom taxonomy profile: {taxonomy_source}")
+    if threat_mapping_source != "builtin":
+        status(f"Using custom threat mapping profile: {threat_mapping_source}")
+
+
+_SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"]
+
+
+def _has_findings_at_or_above(findings, threshold: str) -> bool:
+    """Return True if *findings* contains any at or above *threshold*."""
+    idx = _SEVERITY_ORDER.index(threshold.lower())
+    failing_levels = {s.upper() for s in _SEVERITY_ORDER[: idx + 1]}
+    return any(f.severity.value in failing_levels for f in findings)
+
+
+def _report_has_findings_at_or_above(report, threshold: str) -> bool:
+    """Return True if *report* has any finding at or above *threshold*."""
+    idx = _SEVERITY_ORDER.index(threshold.lower())
+    counts = [
+        ("critical", report.critical_count),
+        ("high", report.high_count),
+        ("medium", report.medium_count),
+        ("low", report.low_count),
+        ("info", report.info_count),
+    ]
+    return any(count > 0 for level, count in counts if _SEVERITY_ORDER.index(level) <= idx)
+
+
+def _report_fails_gate(report, threshold: str) -> bool:
+    """Return True if *report* should fail a severity gate.
+
+    A skill that was skipped (its analysis crashed) was never scanned, so it
+    fails the gate just like a finding at or above *threshold*.
+    """
+    return bool(report.skills_skipped) or _report_has_findings_at_or_above(report, threshold)
+
+
+def _resolve_fail_severity(args: argparse.Namespace) -> str | None:
+    """Determine the effective severity threshold from CLI flags.
+
+    ``--fail-on-severity LEVEL`` takes precedence.  ``--fail-on-findings``
+    (legacy boolean flag) is treated as ``--fail-on-severity high``.
+    Returns ``None`` when neither flag is set.
+    """
+    fail_on_severity = getattr(args, "fail_on_severity", None)
+    if isinstance(fail_on_severity, str):
+        return fail_on_severity
+    if getattr(args, "fail_on_findings", False):
+        return "high"
+    return None
+
+
+def _write_output(args: argparse.Namespace, output: str) -> None:
+    """Write *output* to a file or stdout, and emit any additional formats."""
+    formats = _get_formats(args)
+    primary_fmt = formats[0] if formats else "summary"
+    render_md = _should_render_markdown(args)
+
+    # Primary format: --output-<fmt> (explicit) > --output (generic) > stdout
+    primary_file = getattr(args, f"output_{primary_fmt}", None) or args.output
+    if primary_file:
+        with open(primary_file, "w", encoding="utf-8") as fh:
+            fh.write(output)
+        print(f"Report saved to: {_redact_status_message(str(primary_file))}")
+    else:
+        if primary_fmt == "markdown" and render_md:
+            Console().print(Markdown(output))
+        else:
+            print(output)
+
+    # Additional formats beyond the first: each gets its own --output-<fmt> file
+    # or is printed to stdout if no file path is given.
+    if len(formats) > 1:
+        result_or_report = getattr(args, "_result_or_report", None)
+        if result_or_report is not None:
+            console = Console()
+            for fmt in formats[1:]:
+                formatted = _format_single(fmt, args, result_or_report)
+                output_key = f"output_{fmt}"
+                file_path = getattr(args, output_key, None)
+                if file_path:
+                    with open(file_path, "w", encoding="utf-8") as fh:
+                        fh.write(formatted)
+                    print(f"{fmt.upper()} report saved to: {_redact_status_message(str(file_path))}")
+                else:
+                    if fmt == "markdown" and render_md:
+                        console.print(Markdown(formatted))
+                    else:
+                        print(formatted)
+
+
+def _should_render_markdown(args: argparse.Namespace) -> bool:
+    """Decide whether markdown should be rendered for terminal output."""
+    if getattr(args, "no_render_markdown", False):
+        return False
+    if getattr(args, "render_markdown", False):
+        return True
+    return sys.stdout.isatty()
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+
+def _handle_rule_packs_list(args: argparse.Namespace) -> bool:
+    """If ``--rule-packs list`` was passed, print available packs and return True."""
+    pack_names: list[str] | None = getattr(args, "rule_packs", None)
+    if pack_names and pack_names == ["list"]:
+        from ..data import list_available_packs
+
+        packs = list_available_packs()
+        if packs:
+            print("Available rule packs:")
+            for p in packs:
+                print(f"  - {p}")
+        else:
+            print("No additional rule packs available.")
+        return True
+    return False
+
+
+def scan_command(args: argparse.Namespace) -> int:
+    """Handle the ``scan`` command for a single skill."""
+    if _handle_rule_packs_list(args):
+        return 0
+
+    skill_dir = Path(args.skill_directory)
+    if not skill_dir.exists():
+        print(
+            f"Error: Directory does not exist: {_redact_status_message(str(skill_dir))}",
+            file=sys.stderr,
+        )
+        return 1
+
+    status = _make_status_printer(args)
+    try:
+        _configure_taxonomy_and_threat_mapping(args, status)
+    except Exception as e:
+        _print_cli_error("Error loading taxonomy configuration: ", e)
+        return 1
+
+    try:
+        policy = _load_policy(args)
+        if getattr(args, "adjudicate", False):
+            policy.adjudicator.enabled = True
+        analyzers = _build_analyzers(policy, args, status)
+        llm_max_tokens = getattr(args, "llm_max_tokens", None)
+        llm_reasoning_effort = getattr(args, "llm_reasoning_effort", None)
+        meta_analyzer = _build_meta_analyzer(
+            args,
+            len(analyzers),
+            status,
+            policy=policy,
+            max_tokens=llm_max_tokens,
+            reasoning_effort=llm_reasoning_effort,
+        )
+        scanner = _create_skill_scanner(analyzers, policy, args, status)
+    except Exception as e:
+        _print_cli_error("Error configuring scan: ", e)
+        return EXIT_CONFIGURATION_ERROR
+    lenient = getattr(args, "lenient", False)
+    skill_file = getattr(args, "skill_file", None)
+
+    try:
+        result = scanner.scan_skill(skill_dir, lenient=lenient, skill_file=skill_file)
+
+        # Meta-analysis
+        if meta_analyzer and result.findings and apply_meta_analysis_to_results is not None:
+            status("Running meta-analysis to filter false positives...")
+            try:
+                skill = scanner.loader.load_skill(skill_dir, lenient=lenient, skill_file=skill_file)
+                original_count = len(result.findings)
+                meta_result = asyncio.run(
+                    meta_analyzer.analyze_with_findings(
+                        skill=skill, findings=result.findings, analyzers_used=result.analyzers_used
+                    )
+                )
+                filtered = apply_meta_analysis_to_results(
+                    original_findings=result.findings, meta_result=meta_result, skill=skill
+                )
+                result.findings = filtered
+                result.analyzers_used.append("meta_analyzer")
+                if merge_meta_analyzer_usage is not None:
+                    merge_meta_analyzer_usage(result, meta_analyzer)
+
+                # Surface meta-analysis insights into scan_metadata
+                if result.scan_metadata is None:
+                    result.scan_metadata = {}
+                if meta_result.correlations:
+                    result.scan_metadata["meta_correlations"] = meta_result.correlations
+                if meta_result.recommendations:
+                    result.scan_metadata["meta_recommendations"] = meta_result.recommendations
+                if meta_result.overall_risk_assessment:
+                    result.scan_metadata["meta_risk_assessment"] = meta_result.overall_risk_assessment
+
+                fp_count = len(meta_result.false_positives)
+                retained = original_count - fp_count
+                new = len(meta_result.missed_threats)
+                corr = len(meta_result.correlations)
+                parts = [f"{fp_count} false positives removed", f"{retained} findings retained"]
+                if corr:
+                    parts.append(f"{corr} correlation groups")
+                if new:
+                    parts.append(f"{new} new threats detected")
+                status(f"Meta-analysis complete: {', '.join(parts)}")
+            except Exception as e:
+                logger.warning("Meta-analysis failed: %s", _redact_status_message(str(e)))
+
+        # Strip false positives from output unless --verbose
+        if not getattr(args, "verbose", False):
+            result.findings = [f for f in result.findings if not f.metadata.get("meta_false_positive", False)]
+        refresh_taxonomy_scan_metadata(result)
+
+        args._result_or_report = result
+        _write_output(args, _format_output(args, result))
+
+        fail_severity = _resolve_fail_severity(args)
+        if fail_severity and _has_findings_at_or_above(result.findings, fail_severity):
+            return 1
+        return 0
+
+    except SkillLoadError as e:
+        _print_cli_error("Error loading skill: ", e)
+        return 1
+    except Exception as e:
+        _print_cli_error("Unexpected error: ", e, include_traceback=True)
+        return 1
+    finally:
+        scanner.close()
+
+
+def scan_all_command(args: argparse.Namespace) -> int:
+    """Handle the ``scan-all`` command for multiple skills."""
+    if _handle_rule_packs_list(args):
+        return 0
+
+    skills_dir = Path(args.skills_directory)
+    if not skills_dir.exists():
+        print(
+            f"Error: Directory does not exist: {_redact_status_message(str(skills_dir))}",
+            file=sys.stderr,
+        )
+        return 1
+
+    status = _make_status_printer(args)
+    try:
+        _configure_taxonomy_and_threat_mapping(args, status)
+    except Exception as e:
+        _print_cli_error("Error loading taxonomy configuration: ", e)
+        return 1
+
+    try:
+        policy = _load_policy(args)
+        if getattr(args, "adjudicate", False):
+            policy.adjudicator.enabled = True
+        analyzers = _build_analyzers(policy, args, status)
+        llm_max_tokens = getattr(args, "llm_max_tokens", None)
+        llm_reasoning_effort = getattr(args, "llm_reasoning_effort", None)
+        meta_analyzer = _build_meta_analyzer(
+            args,
+            len(analyzers),
+            status,
+            policy=policy,
+            max_tokens=llm_max_tokens,
+            reasoning_effort=llm_reasoning_effort,
+        )
+        scanner = _create_skill_scanner(analyzers, policy, args, status)
+    except Exception as e:
+        _print_cli_error("Error configuring scan: ", e)
+        return EXIT_CONFIGURATION_ERROR
+
+    lenient = getattr(args, "lenient", False)
+    skill_file = getattr(args, "skill_file", None)
+
+    try:
+        check_overlap = getattr(args, "check_overlap", False)
+        report = scanner.scan_directory(
+            skills_dir,
+            recursive=args.recursive,
+            check_overlap=check_overlap,
+            lenient=lenient,
+            skill_file=skill_file,
+        )
+
+        if report.total_skills_scanned == 0:
+            print("No skills found to scan.", file=sys.stderr)
+            return 1
+
+        # Per-skill meta-analysis
+        if meta_analyzer and apply_meta_analysis_to_results is not None:
+            status("Running meta-analysis on scan results...")
+            total_original, total_fp, total_new = 0, 0, 0
+            for result in report.scan_results:
+                if not result.findings:
+                    continue
+                try:
+                    skill = scanner.loader.load_skill(
+                        Path(result.skill_directory), lenient=lenient, skill_file=skill_file
+                    )
+                    original_count = len(result.findings)
+                    meta_result = asyncio.run(
+                        meta_analyzer.analyze_with_findings(
+                            skill=skill, findings=result.findings, analyzers_used=result.analyzers_used
+                        )
+                    )
+                    filtered = apply_meta_analysis_to_results(
+                        original_findings=result.findings, meta_result=meta_result, skill=skill
+                    )
+                    total_original += original_count
+                    total_fp += len(meta_result.false_positives)
+                    total_new += len(meta_result.missed_threats)
+                    result.findings = filtered
+                    result.analyzers_used.append("meta_analyzer")
+                    if merge_meta_analyzer_usage is not None:
+                        merge_meta_analyzer_usage(result, meta_analyzer)
+
+                    # Surface meta-analysis insights
+                    if result.scan_metadata is None:
+                        result.scan_metadata = {}
+                    if meta_result.correlations:
+                        result.scan_metadata["meta_correlations"] = meta_result.correlations
+                    if meta_result.recommendations:
+                        result.scan_metadata["meta_recommendations"] = meta_result.recommendations
+                    if meta_result.overall_risk_assessment:
+                        result.scan_metadata["meta_risk_assessment"] = meta_result.overall_risk_assessment
+                except Exception as e:
+                    logger.warning(
+                        "Meta-analysis failed for %s: %s",
+                        _redact_status_message(result.skill_name),
+                        _redact_status_message(str(e)),
+                    )
+
+            retained = total_original - total_fp
+            parts = [f"{total_fp} false positives removed", f"{retained} findings retained"]
+            if total_new:
+                parts.append(f"{total_new} new threats detected")
+            status(f"Meta-analysis complete: {', '.join(parts)}")
+
+        # Strip false positives from output unless --verbose
+        if not getattr(args, "verbose", False):
+            for result in report.scan_results:
+                result.findings = [f for f in result.findings if not f.metadata.get("meta_false_positive", False)]
+            report.cross_skill_findings = [
+                f for f in report.cross_skill_findings if not f.metadata.get("meta_false_positive", False)
+            ]
+        for result in report.scan_results:
+            refresh_taxonomy_scan_metadata(result)
+
+        # Recalculate report totals after meta-analysis and FP stripping
+        all_findings = [f for r in report.scan_results for f in r.findings] + report.cross_skill_findings
+        report.total_findings = len(all_findings)
+        report.critical_count = sum(1 for f in all_findings if f.severity.value == "CRITICAL")
+        report.high_count = sum(1 for f in all_findings if f.severity.value == "HIGH")
+        report.medium_count = sum(1 for f in all_findings if f.severity.value == "MEDIUM")
+        report.low_count = sum(1 for f in all_findings if f.severity.value == "LOW")
+        report.info_count = sum(1 for f in all_findings if f.severity.value == "INFO")
+        report.safe_count = sum(1 for r in report.scan_results if r.is_safe)
+
+        args._result_or_report = report
+        _write_output(args, _format_output(args, report))
+
+        fail_severity = _resolve_fail_severity(args)
+        if fail_severity and _report_fails_gate(report, fail_severity):
+            return 1
+        return 0
+
+    except Exception as e:
+        _print_cli_error("Unexpected error: ", e, include_traceback=True)
+        return 1
+    finally:
+        scanner.close()
+
+
+def scan_repo_command(args: argparse.Namespace) -> int:
+    """Handle the ``scan-repo`` command -- clone a GitHub repo and scan it."""
+    from ..core.exceptions import RepoFetchError
+    from ..core.repo_fetcher import clone_repo, resolve_repo_url
+
+    status = _make_status_printer(args)
+
+    try:
+        url = resolve_repo_url(args.repo)
+    except RepoFetchError as e:
+        _print_cli_error("Error resolving repo URL: ", e)
+        return 1
+
+    status(f"Cloning {url} ...")
+
+    try:
+        with clone_repo(url) as tmp_path:
+            status("Cloned. Scanning skills...")
+
+            try:
+                _configure_taxonomy_and_threat_mapping(args, status)
+            except Exception as e:
+                _print_cli_error("Error loading taxonomy configuration: ", e)
+                return 1
+
+            try:
+                policy = _load_policy(args)
+                if getattr(args, "adjudicate", False):
+                    policy.adjudicator.enabled = True
+                analyzers = _build_analyzers(policy, args, status)
+                llm_max_tokens = getattr(args, "llm_max_tokens", None)
+                llm_reasoning_effort = getattr(args, "llm_reasoning_effort", None)
+                meta_analyzer = _build_meta_analyzer(
+                    args,
+                    len(analyzers),
+                    status,
+                    policy=policy,
+                    max_tokens=llm_max_tokens,
+                    reasoning_effort=llm_reasoning_effort,
+                )
+                scanner = _create_skill_scanner(analyzers, policy, args, status)
+            except Exception as e:
+                _print_cli_error("Error configuring scan: ", e)
+                return EXIT_CONFIGURATION_ERROR
+
+            try:
+                report = scanner.scan_directory(
+                    tmp_path,
+                    recursive=args.recursive,
+                    check_overlap=getattr(args, "check_overlap", False),
+                    lenient=getattr(args, "lenient", False),
+                    skill_file=getattr(args, "skill_file", None),
+                )
+
+                if report.total_skills_scanned == 0:
+                    print("No skills found to scan.", file=sys.stderr)
+                    return 1
+
+                # Per-skill meta-analysis
+                if meta_analyzer and apply_meta_analysis_to_results is not None:
+                    status("Running meta-analysis on scan results...")
+                    total_original, total_fp, total_new = 0, 0, 0
+                    for result in report.scan_results:
+                        if not result.findings:
+                            continue
+                        try:
+                            skill = scanner.loader.load_skill(
+                                Path(result.skill_directory),
+                                lenient=getattr(args, "lenient", False),
+                                skill_file=getattr(args, "skill_file", None),
+                            )
+                            original_count = len(result.findings)
+                            meta_result = asyncio.run(
+                                meta_analyzer.analyze_with_findings(
+                                    skill=skill, findings=result.findings, analyzers_used=result.analyzers_used
+                                )
+                            )
+                            filtered = apply_meta_analysis_to_results(
+                                original_findings=result.findings, meta_result=meta_result, skill=skill
+                            )
+                            total_original += original_count
+                            total_fp += len(meta_result.false_positives)
+                            total_new += len(meta_result.missed_threats)
+                            result.findings = filtered
+                            result.analyzers_used.append("meta_analyzer")
+                            if merge_meta_analyzer_usage is not None:
+                                merge_meta_analyzer_usage(result, meta_analyzer)
+
+                            # Surface meta-analysis insights
+                            if result.scan_metadata is None:
+                                result.scan_metadata = {}
+                            if meta_result.correlations:
+                                result.scan_metadata["meta_correlations"] = meta_result.correlations
+                            if meta_result.recommendations:
+                                result.scan_metadata["meta_recommendations"] = meta_result.recommendations
+                            if meta_result.overall_risk_assessment:
+                                result.scan_metadata["meta_risk_assessment"] = meta_result.overall_risk_assessment
+                        except Exception as e:
+                            logger.warning(
+                                "Meta-analysis failed for %s: %s",
+                                _redact_status_message(result.skill_name),
+                                _redact_status_message(str(e)),
+                            )
+
+                    retained = total_original - total_fp
+                    parts = [f"{total_fp} false positives removed", f"{retained} findings retained"]
+                    if total_new:
+                        parts.append(f"{total_new} new threats detected")
+                    status(f"Meta-analysis complete: {', '.join(parts)}")
+
+                # Strip false positives from output unless --verbose
+                if not getattr(args, "verbose", False):
+                    for result in report.scan_results:
+                        result.findings = [
+                            f for f in result.findings if not f.metadata.get("meta_false_positive", False)
+                        ]
+                    report.cross_skill_findings = [
+                        f for f in report.cross_skill_findings if not f.metadata.get("meta_false_positive", False)
+                    ]
+                for result in report.scan_results:
+                    refresh_taxonomy_scan_metadata(result)
+
+                # Recalculate report totals after meta-analysis and FP stripping
+                all_findings = [f for r in report.scan_results for f in r.findings] + report.cross_skill_findings
+                report.total_findings = len(all_findings)
+                report.critical_count = sum(1 for f in all_findings if f.severity.value == "CRITICAL")
+                report.high_count = sum(1 for f in all_findings if f.severity.value == "HIGH")
+                report.medium_count = sum(1 for f in all_findings if f.severity.value == "MEDIUM")
+                report.low_count = sum(1 for f in all_findings if f.severity.value == "LOW")
+                report.info_count = sum(1 for f in all_findings if f.severity.value == "INFO")
+                report.safe_count = sum(1 for r in report.scan_results if r.is_safe)
+
+                args._result_or_report = report
+                _write_output(args, _format_output(args, report))
+
+                fail_severity = _resolve_fail_severity(args)
+                if fail_severity and _report_fails_gate(report, fail_severity):
+                    return 1
+                return 0
+
+            except Exception as e:
+                _print_cli_error("Unexpected error: ", e, include_traceback=True)
+                return 1
+            finally:
+                scanner.close()
+
+    except RepoFetchError as e:
+        _print_cli_error("Error cloning repository: ", e)
+        return 1
+
+
+def list_analyzers_command(_args: argparse.Namespace) -> int:
+    """Handle the ``list-analyzers`` command."""
+    entries = [
+        ("static_analyzer", True, "Default", "Pattern-based detection using YAML + YARA rules", "--policy"),
+        ("bytecode_analyzer", True, "Default", "Python .pyc integrity verification", "--policy"),
+        ("pipeline_analyzer", True, "Default", "Command pipeline taint analysis", "--policy"),
+        (
+            "behavioral_analyzer",
+            True,
+            "Available",
+            "Static dataflow analysis (AST + taint tracking)",
+            "--use-behavioral",
+        ),
+        (
+            "virustotal_analyzer",
+            True,
+            "Available (optional)",
+            "Hash-based malware detection via VirusTotal API",
+            "--use-virustotal --vt-api-key KEY",
+        ),
+        (
+            "aidefense_analyzer",
+            True,
+            "Available (optional)",
+            "Cisco AI Defense cloud-based threat detection",
+            "--use-aidefense --aidefense-api-key KEY",
+        ),
+        (
+            "llm_analyzer",
+            LLM_AVAILABLE,
+            "Available" if LLM_AVAILABLE else "Not installed",
+            "Semantic analysis using LLMs as judges",
+            "--use-llm",
+        ),
+        ("trigger_analyzer", True, "Available", "Detects overly generic skill descriptions", "--use-trigger"),
+        (
+            "meta_analyzer",
+            META_AVAILABLE,
+            "Available" if META_AVAILABLE else "Not installed",
+            "Second-pass LLM FP filtering & prioritization",
+            "--enable-meta",
+        ),
+    ]
+
+    print("Available Analyzers:\n")
+    for i, (name, available, badge, desc, usage) in enumerate(entries, 1):
+        ok = "[OK]" if available else "[WARNING]"
+        print(f"  {i}. {name} {ok} {badge}")
+        print(f"     {desc}")
+        print(f"     Usage: {usage}")
+        print()
+
+    return 0
+
+
+def validate_rules_command(args: argparse.Namespace) -> int:
+    """Handle the ``validate-rules`` command."""
+    from ..core.cel.go_runtime import CelGoRuntime
+    from ..core.cel.models import CelRule
+    from ..core.cel.validator import validate_cel_expression
+    from ..core.rule_registry import PackLoader
+    from ..core.rules.patterns import RuleLoader
+
+    try:
+        trusted_dirs = _trusted_rule_pack_paths(args)
+        registry = None
+        if trusted_dirs or not args.rules_file:
+            registry_dirs: list[Path | str] = [*trusted_dirs]
+            registry = PackLoader().build_registry(trusted_dirs=registry_dirs)
+
+        loader = RuleLoader(
+            Path(args.rules_file) if args.rules_file else None,
+            trusted_pack_dirs=trusted_dirs,
+            strict=True,
+        )
+        rules = loader.load_rules()
+        print(f"[OK] Successfully loaded {len(rules)} signature rules")
+        if registry is not None:
+            print(f"[OK] Successfully validated {len(registry)} manifest rules")
+            if trusted_dirs:
+                # Avoid deriving log output from administrator-supplied pack
+                # objects. Successful validation is the useful status signal.
+                print("[OK] Successfully validated trusted rule pack configuration")
+
+            selected_pack_blockers: list[str] = []
+            for pack_name, pack in sorted(registry.all_packs().items()):
+                report = getattr(pack, "validation_report", None)
+                if report is None or report.schema_status != "legacy":
+                    continue
+                implementation_count = report.signature_implementation_count + report.yara_implementation_count
+                print(
+                    f"[LEGACY] Bundled pack {_redact_status_message(pack_name)!r}: validated exact identity and "
+                    f"declared metadata for {implementation_count} signature/YARA implementation(s); "
+                    "manifest is not schema v2"
+                )
+                for blocker in report.promotion_blockers:
+                    print(f"  [PROMOTION BLOCKER] {_redact_status_message(blocker)}")
+                    selected_pack_blockers.append(f"{pack_name}: {blocker}")
+
+            if selected_pack_blockers:
+                raise ValueError(
+                    "selected rule packs have unresolved promotion blockers: " + "; ".join(selected_pack_blockers)
+                )
+
+            cel_rules: list[CelRule] = []
+            for definition in registry.all_rules().values():
+                cel_rule = getattr(definition, "cel", None)
+                if isinstance(cel_rule, CelRule):
+                    cel_rules.append(cel_rule)
+            cel_rules.sort(key=lambda rule: rule.rule_id)
+            for cel_rule in cel_rules:
+                validate_cel_expression(cel_rule.expression)
+
+            if cel_rules:
+                print(
+                    "[OK] Bounded protobuf descriptor validation passed for "
+                    f"{len(cel_rules)} CEL expression(s) (ScanFacts v1)"
+                )
+                with CelGoRuntime(cel_rules) as runtime:
+                    print(
+                        "[OK] Official cel-go compiler atomically type-checked "
+                        f"{len(cel_rules)} expression(s) with cel-go {runtime.version}"
+                    )
+            else:
+                print("[OK] No CEL expressions selected")
+        print()
+        print("Rules by category:")
+        for category, category_rules in loader.rules_by_category.items():
+            print(f"  - {category.value}: {len(category_rules)} rules")
+        return 0
+    except Exception as e:
+        _print_cli_error("[FAIL] Error validating rules: ", e)
+        return 1
+
+
+def generate_policy_command(args: argparse.Namespace) -> int:
+    """Handle the ``generate-policy`` command."""
+    output_path = Path(args.output)
+    preset = getattr(args, "preset", "balanced")
+    try:
+        policy = ScanPolicy.from_preset(preset)
+        policy.to_yaml(output_path)
+        print(f"Generated {preset} scan policy: {_redact_status_message(str(output_path))}\n")
+        print("Edit the file to customise, then use:")
+        print(f"  skill-scanner scan --policy {_redact_status_message(str(output_path))} --use-llm /path/to/skill\n")
+        print("Or use the interactive configurator:")
+        print("  skill-scanner configure-policy\n")
+        print("Available presets: balanced (default) | low-noise | quiet | strict | permissive")
+        print("Run every preset with the LLM judge (--use-llm). For fewer false positives use low-noise,")
+        print("or quiet, which requires the judge. strict is for hunting, not gating.")
+        return 0
+    except Exception as e:
+        _print_cli_error("Error generating policy: ", e)
+        return 1
+
+
+def configure_policy_command(args: argparse.Namespace) -> int:
+    """Handle the ``configure-policy`` command (interactive TUI)."""
+    from .policy_tui import run_policy_tui
+
+    return run_policy_tui(
+        output_path=getattr(args, "output", "scan_policy.yaml"),
+        input_path=getattr(args, "input", None),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Summary formatters
+# ---------------------------------------------------------------------------
+
+
+def _generate_summary(result) -> str:
+    from ..core.models import Severity
+
+    lines = [
+        "=" * 60,
+        f"Skill: {result.skill_name}",
+        "=" * 60,
+        f"Status: {'[OK] SAFE' if result.is_safe else '[FAIL] ISSUES FOUND'}",
+        f"Max Severity: {result.max_severity.value}",
+        f"Total Findings: {len(result.findings)}",
+        f"Scan Duration: {result.scan_duration_seconds:.2f}s",
+        "",
+    ]
+    if result.findings:
+        lines.append("Findings Summary:")
+        for sev in (Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW, Severity.INFO):
+            lines.append(f"  {sev.value:>8s}: {len(result.get_findings_by_severity(sev))}")
+    return "\n".join(lines)
+
+
+def _generate_multi_skill_summary(report) -> str:
+    lines = [
+        "=" * 60,
+        "Agent Skills Security Scan Report",
+        "=" * 60,
+        f"Skills Scanned: {report.total_skills_scanned}",
+        f"Safe Skills: {report.safe_count}",
+        f"Total Findings: {report.total_findings}",
+    ]
+    if report.skills_skipped:
+        lines.append(f"Skills Skipped: {len(report.skills_skipped)}")
+    lines += [
+        "",
+        "Findings by Severity:",
+        f"  Critical: {report.critical_count}",
+        f"     High: {report.high_count}",
+        f"   Medium: {report.medium_count}",
+        f"      Low: {report.low_count}",
+        f"     Info: {report.info_count}",
+        "",
+        "Individual Skills:",
+    ]
+    for r in report.scan_results:
+        tag = "[OK]" if r.is_safe else "[FAIL]"
+        lines.append(f"  {tag} {r.skill_name} - {len(r.findings)} findings ({r.max_severity.value})")
+    if report.cross_skill_findings:
+        lines.append("")
+        lines.append("Cross-Skill Findings:")
+        for f in report.cross_skill_findings:
+            lines.append(f"  [{f.severity.value}] {f.title}")
+    if report.skills_skipped:
+        lines.append("")
+        lines.append("Skipped Skills:")
+        for entry in report.skills_skipped:
+            lines.append(f"  [SKIP] {entry['skill']} - {entry['reason']}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Shared argparse helpers
+# ---------------------------------------------------------------------------
+
+
+_VALID_FORMATS = ("summary", "json", "markdown", "table", "sarif", "html")
+
+
+def _add_common_scan_flags(parser: argparse.ArgumentParser) -> None:
+    """Add flags shared between ``scan`` and ``scan-all``."""
+    parser.add_argument(
+        "--format",
+        action="append",
+        choices=list(_VALID_FORMATS),
+        default=None,
+        dest="format",
+        help=(
+            "Output format (default: summary). May be specified multiple times "
+            "to produce several reports in one run, e.g. --format markdown --format sarif. "
+            "Use 'sarif' for GitHub Code Scanning, 'html' for interactive report."
+        ),
+    )
+    parser.add_argument(
+        "--output", "-o", help="Default output file path (overridden by --output-<fmt> for a specific format)"
+    )
+    parser.add_argument("--output-json", help="Write JSON report to this file")
+    parser.add_argument("--output-sarif", help="Write SARIF report to this file")
+    parser.add_argument("--output-markdown", help="Write Markdown report to this file")
+    parser.add_argument("--output-html", help="Write HTML report to this file")
+    parser.add_argument("--output-table", help="Write Table report to this file")
+    parser.add_argument("--detailed", action="store_true", help="Include detailed findings (Markdown output only)")
+    md_render_group = parser.add_mutually_exclusive_group()
+    md_render_group.add_argument(
+        "--render-markdown",
+        action="store_true",
+        help="With --format markdown: render markdown even when stdout is not detected as a TTY.",
+    )
+    md_render_group.add_argument(
+        "--no-render-markdown",
+        action="store_true",
+        help="With --format markdown to terminal: print raw markdown instead of rendering (for pipe/copy).",
+    )
+    parser.add_argument("--compact", action="store_true", help="Compact JSON output")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Include per-finding policy fingerprints, co-occurrence metadata, and keep meta-analyzer false positives in output",
+    )
+    parser.add_argument("--fail-on-findings", action="store_true", help="Exit with error if critical/high findings")
+    parser.add_argument(
+        "--fail-on-severity",
+        choices=["critical", "high", "medium", "low", "info"],
+        default=None,
+        metavar="LEVEL",
+        help="Exit with error if findings at or above LEVEL exist (critical, high, medium, low, info)",
+    )
+    parser.add_argument("--use-behavioral", action="store_true", help="Enable behavioral dataflow analysis")
+    parser.add_argument("--use-llm", action="store_true", help="Enable LLM-based semantic analysis (requires API key)")
+    parser.add_argument("--use-virustotal", action="store_true", help="Enable VirusTotal scanning (requires API key)")
+    parser.add_argument("--vt-api-key", help="VirusTotal API key (or set VIRUSTOTAL_API_KEY)")
+    parser.add_argument("--vt-upload-files", action="store_true", help="Upload unknown files to VirusTotal")
+    parser.add_argument("--use-aidefense", action="store_true", help="Enable AI Defense analyzer (requires API key)")
+    parser.add_argument("--aidefense-api-key", help="AI Defense API key (or set AI_DEFENSE_API_KEY)")
+    parser.add_argument("--aidefense-api-url", help="AI Defense API URL (optional, defaults to US region)")
+    parser.add_argument(
+        "--use-osv",
+        action="store_true",
+        help="Enable OSV.dev dependency vulnerability scanning (no API key; requires network)",
+    )
+    parser.add_argument(
+        "--llm-provider",
+        choices=["anthropic", "openai", "openai-compatible"],
+        default=None,
+        help="LLM provider shortcut or explicit OpenAI-compatible override",
+    )
+    parser.add_argument(
+        "--system-one-endpoint",
+        default=None,
+        metavar="URL",
+        help=(
+            "Optional System One screening endpoint speaking POST /v1/systemone. Advisory "
+            "only: it records a calibrated probability and can never change a finding, a "
+            "severity or the verdict. The model measured for this scored inverted against "
+            "labelled corpora, so acting on it would make results worse; see "
+            "docs/reference/measured-results.md before relying on it."
+        ),
+    )
+    parser.add_argument(
+        "--system-one-model",
+        default=None,
+        metavar="NAME",
+        help="Model name to send to the System One endpoint. Required with --system-one-endpoint.",
+    )
+    parser.add_argument(
+        "--llm-decompose",
+        action="store_true",
+        help=(
+            "Run the LLM analyzer once per focus (declared purpose, policy surface, security "
+            "behaviors) and union the findings, instead of one general pass. Raises recall where a "
+            "single pass was missing findings, at roughly three times the model calls. Measured "
+            "effect varies by corpus and model; see docs/reference/measured-results.md."
+        ),
+    )
+    parser.add_argument(
+        "--llm-consensus-runs",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Run LLM analysis N times and keep only findings with majority agreement (reduces false positives, increases cost)",
+    )
+    parser.add_argument(
+        "--llm-max-tokens",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help="Maximum output tokens for LLM responses (default: 8192). Raise if scans produce truncated JSON.",
+    )
+    parser.add_argument(
+        "--llm-reasoning-effort",
+        choices=LLM_REASONING_EFFORT_VALUES,
+        default=None,
+        metavar="LEVEL",
+        help=(
+            "Optional LLM reasoning effort: disabled, minimal, low, medium, high, xhigh, or max. "
+            "Unset preserves the provider default."
+        ),
+    )
+    parser.add_argument("--use-trigger", action="store_true", help="Enable trigger specificity analysis")
+    parser.add_argument(
+        "--enable-meta",
+        action="store_true",
+        help="Enable the meta-analyzer (2+ analyzers). Off by default: measured to cost recall",
+    )
+    parser.add_argument(
+        "--adjudicate",
+        action="store_true",
+        help=(
+            "Enable per-finding adjudicator: for each deterministic HIGH/CRITICAL finding, "
+            "ask the LLM whether the matched content is a real threat or a literal-regex "
+            "false positive. Demote-only (never promotes) — LLM errors leave findings at "
+            "original severity. Uses SKILL_SCANNER_LLM_MODEL (or "
+            "SKILL_SCANNER_ADJUDICATOR_LLM_MODEL to override)."
+        ),
+    )
+    parser.add_argument(
+        "--policy",
+        metavar="PRESET_OR_PATH",
+        help=(
+            "Scan policy: a preset (balanced, low-noise, quiet, strict, permissive) or a path to custom "
+            "YAML. For fewer false positives use low-noise or quiet together with --use-llm; quiet "
+            "requires the LLM judge"
+        ),
+    )
+    parser.add_argument(
+        "--lenient",
+        action="store_true",
+        help=(
+            "Tolerate malformed YAML / missing fields: coerce bad fields, fill defaults, and continue "
+            "instead of failing. Binary and non-UTF-8 files always fail."
+        ),
+    )
+    parser.add_argument(
+        "--skill-file",
+        metavar="FILENAME",
+        help="Custom metadata filename to use instead of SKILL.md (e.g. README.md)",
+    )
+    parser.add_argument(
+        "--custom-rules",
+        metavar="PATH",
+        help="Path to directory containing custom YARA rules (.yara files)",
+    )
+    parser.add_argument(
+        "--rule-packs",
+        nargs="+",
+        metavar="PACK",
+        help="Additional signature rule packs to enable (e.g. 'atr'). Use '--rule-packs list' to show available packs.",
+    )
+    parser.add_argument(
+        "--trusted-rule-pack",
+        action="append",
+        metavar="PATH",
+        help=(
+            "Path to an administrator-trusted schema-v2 rule pack. May be specified multiple times. "
+            "Trusted packs are strictly validated and may contain bounded CEL gates, signatures, and YARA rules."
+        ),
+    )
+    parser.add_argument(
+        "--cel-mode",
+        choices=[mode.value for mode in CelMode],
+        default=None,
+        help="Override the scan policy CEL mode (off, shadow, or enforce)",
+    )
+    parser.add_argument(
+        "--taxonomy",
+        metavar="PATH",
+        help="Path to custom taxonomy JSON/YAML (overrides SKILL_SCANNER_TAXONOMY_PATH)",
+    )
+    parser.add_argument(
+        "--threat-mapping",
+        metavar="PATH",
+        help="Path to custom threat mapping JSON (overrides SKILL_SCANNER_THREAT_MAPPING_PATH)",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build and return the CLI argument parser."""
+    parser = argparse.ArgumentParser(
+        description="Skill Scanner - Security scanner for agent skills packages",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  skill-scanner scan /path/to/skill
+  skill-scanner scan /path/to/skill --use-behavioral --use-llm
+  skill-scanner scan /path/to/skill --use-llm --enable-meta --format json
+  skill-scanner scan /path/to/skill --format json --verbose
+  skill-scanner scan /path/to/skill --policy strict
+  skill-scanner scan /path/to/skill --format markdown --format sarif --output-sarif report.sarif
+  skill-scanner scan-all /path/to/skills --recursive
+  skill-scanner generate-policy -o my_policy.yaml
+  skill-scanner configure-policy
+  skill-scanner list-analyzers
+        """,
+    )
+    parser.add_argument("--version", "-V", action="version", version=f"%(prog)s {__version__}")
+    subparsers = parser.add_subparsers(dest="command", help="Command to execute")
+
+    # -- scan --------------------------------------------------------------
+    scan_p = subparsers.add_parser("scan", help="Scan a single skill package")
+    scan_p.add_argument("skill_directory", help="Path to skill directory")
+    _add_common_scan_flags(scan_p)
+
+    # -- scan-all ----------------------------------------------------------
+    scan_all_p = subparsers.add_parser("scan-all", help="Scan multiple skill packages")
+    scan_all_p.add_argument("skills_directory", help="Directory containing skills")
+    scan_all_p.add_argument("--recursive", "-r", action="store_true", help="Recursively search for skills")
+    scan_all_p.add_argument("--check-overlap", action="store_true", help="Enable cross-skill description overlap")
+    _add_common_scan_flags(scan_all_p)
+
+    # -- scan-repo ---------------------------------------------------------
+    scan_repo_p = subparsers.add_parser("scan-repo", help="Clone and scan a GitHub repository for skills")
+    scan_repo_p.add_argument("repo", help="GitHub repo URL (https://github.com/owner/repo) or shorthand (owner/repo)")
+    scan_repo_p.add_argument(
+        "--recursive",
+        "-r",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Recursively search for skills (default: True; use --no-recursive to disable)",
+    )
+    scan_repo_p.add_argument(
+        "--check-overlap", action="store_true", help="Enable cross-skill description overlap check"
+    )
+    _add_common_scan_flags(scan_repo_p)
+
+    # -- list-analyzers ----------------------------------------------------
+    subparsers.add_parser("list-analyzers", help="List available analyzers")
+
+    # -- validate-rules ----------------------------------------------------
+    vr_p = subparsers.add_parser("validate-rules", help="Validate rule signatures")
+    vr_p.add_argument("--rules-file", help="Path to YAML rules file or directory (default: built-in signatures)")
+    vr_p.add_argument(
+        "--trusted-rule-pack",
+        action="append",
+        metavar="PATH",
+        help="Path to an administrator-trusted schema-v2 rule pack; may be specified multiple times",
+    )
+
+    # -- generate-policy ---------------------------------------------------
+    gp_p = subparsers.add_parser("generate-policy", help="Generate a default scan policy YAML")
+    gp_p.add_argument("--output", "-o", default="scan_policy.yaml", help="Output file path")
+    gp_p.add_argument("--preset", choices=ScanPolicy.preset_names(), default="balanced", help="Base preset")
+
+    # -- configure-policy --------------------------------------------------
+    cp_p = subparsers.add_parser("configure-policy", help="Interactive TUI to build a custom scan policy")
+    cp_p.add_argument("--output", "-o", default="scan_policy.yaml", help="Output file path")
+    cp_p.add_argument("--input", "-i", default=None, help="Load existing policy YAML for editing")
+
+    # -- interactive -------------------------------------------------------
+    subparsers.add_parser("interactive", help="Launch the interactive scan wizard")
+
+    return parser
+
+
+def _run_interactive_wizard() -> int:
+    from .wizard import run_wizard
+
+    return run_wizard()
+
+
+def main() -> int:
+    """Main CLI entry point."""
+    parser = build_parser()
+
+    # -- dispatch ----------------------------------------------------------
+    args = parser.parse_args()
+
+    if not args.command:
+        if sys.stdin.isatty():
+            return _run_interactive_wizard()
+        parser.print_help()
+        return 1
+
+    if args.command == "interactive":
+        return _run_interactive_wizard()
+
+    dispatch = {
+        "scan": scan_command,
+        "scan-all": scan_all_command,
+        "scan-repo": scan_repo_command,
+        "list-analyzers": list_analyzers_command,
+        "validate-rules": validate_rules_command,
+        "generate-policy": generate_policy_command,
+        "configure-policy": configure_policy_command,
+    }
+    handler = dispatch.get(args.command)
+    if handler:
+        try:
+            return handler(args)
+        except ReasoningConfigurationError as exc:
+            _print_cli_error("LLM reasoning configuration error: ", exc)
+            return 1
+
+    parser.print_help()
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

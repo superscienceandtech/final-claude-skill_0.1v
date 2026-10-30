@@ -1,0 +1,5 @@
+# Manifest-only social-engineering checks are implemented by the static
+# analyzer, which can inspect parsed frontmatter fields. Keeping inert
+# `file_types: [manifest]` regex aliases here made the implementation source
+# ambiguous without ever participating in runtime signature scanning.
+[]

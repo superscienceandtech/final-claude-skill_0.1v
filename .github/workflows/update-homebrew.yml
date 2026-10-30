@@ -1,0 +1,261 @@
+name: Update Homebrew Formula
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to generate formula for (must be published on PyPI, e.g. 2.0.0)"
+        required: true
+        type: string
+
+# Read-only by default; only the pull-request job below can write.
+permissions:
+  contents: read
+
+jobs:
+  resolve-release:
+    name: Resolve exact published release
+    runs-on: ubuntu-latest
+    outputs:
+      release_sha: ${{ steps.release.outputs.release_sha }}
+    steps:
+      - name: Checkout repository and tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve exact tag commit
+        id: release
+        shell: bash
+        env:
+          RELEASE_REF: ${{ inputs.version }}
+        run: |
+          if ! git check-ref-format "refs/tags/$RELEASE_REF" >/dev/null; then
+            echo "::error::version must be an exact valid git tag"
+            exit 1
+          fi
+          if ! git show-ref --verify --quiet "refs/tags/$RELEASE_REF"; then
+            echo "::error::release tag does not exist: $RELEASE_REF"
+            exit 1
+          fi
+          release_sha="$(git rev-parse "refs/tags/${RELEASE_REF}^{commit}")"
+          if [[ ! "$release_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::release tag did not resolve to a full commit SHA"
+            exit 1
+          fi
+          echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
+
+  generate-formula:
+    name: Generate formula from exact release sdist
+    needs: resolve-release
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The generator reads only PyPI metadata and the hash-verified release
+      # sdist, never this tree, so run the current generator: a fix to it then
+      # applies to every release's formula, not only to later releases.
+      - name: Checkout formula tooling at the workflow ref
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6.7.0
+
+      - name: Install Python 3.12
+        run: uv python install 3.12
+
+      - name: Install qualified Go toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.1"
+          cache-dependency-path: tools/cel_runtime/go.sum
+
+      - name: Wait for PyPI propagation
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "Waiting for cisco-ai-skill-scanner==${VERSION} on PyPI..."
+          for i in $(seq 1 30); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              "https://pypi.org/pypi/cisco-ai-skill-scanner/${VERSION}/json")
+            if [[ "$STATUS" == "200" ]]; then
+              echo "Package available on PyPI after ~$(( i * 10 ))s"
+              exit 0
+            fi
+            echo "  Attempt ${i}/30 — HTTP ${STATUS}, retrying in 10s..."
+            sleep 10
+          done
+          echo "ERROR: Package not found on PyPI after 5 minutes" >&2
+          exit 1
+
+      - name: Regenerate formula
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          uv run python scripts/update_brew_formula.py \
+            --version "$VERSION"
+          ruby -c Formula/skill-scanner.rb
+          grep -F 'depends_on macos: :sonoma' Formula/skill-scanner.rb
+          grep -F 'depends_on "go" => :build' Formula/skill-scanner.rb
+          grep -F 'SKILL_SCANNER_CEL_GO_TARGET' Formula/skill-scanner.rb
+          grep -F 'SKILL_SCANNER_CEL_GO_PREBUILT_DIR' Formula/skill-scanner.rb
+          grep -F 'ENV["PIP_NO_INDEX"] = "1"' Formula/skill-scanner.rb
+          grep -F 'dependency_resources = resources.reject' Formula/skill-scanner.rb
+          grep -F 'resource.stage(wheelhouse)' Formula/skill-scanner.rb
+          grep -F 'venv.pip_install dependency_wheels.join("\n"), build_isolation: false' Formula/skill-scanner.rb
+          grep -F 'venv.pip_install_and_link buildpath, build_isolation: false' Formula/skill-scanner.rb
+          grep -Fx '  preserve_rpath' Formula/skill-scanner.rb
+          grep -F 'system "unzip", "-q", wheel, "skill_scanner/core/cel/_bin/*", "-d", helper_dir' Formula/skill-scanner.rb
+          if grep -F 'resource.cached_download' Formula/skill-scanner.rb; then
+            echo "Generated formula must stage wheels under their valid distribution filenames" >&2
+            exit 1
+          fi
+          if grep -F 'virtualenv_install_with_resources' Formula/skill-scanner.rb; then
+            echo "Generated formula must disable PEP 517 build isolation explicitly" >&2
+            exit 1
+          fi
+          grep -F '"validate-rules"' Formula/skill-scanner.rb
+
+      - name: Upload exact generated formula
+        uses: actions/upload-artifact@v4
+        with:
+          name: skill-scanner-homebrew-formula-${{ inputs.version }}-${{ github.run_id }}
+          path: Formula/skill-scanner.rb
+          if-no-files-found: error
+          retention-days: 7
+
+  smoke-homebrew:
+    name: Smoke Homebrew ${{ matrix.target }}
+    needs:
+      - resolve-release
+      - generate-formula
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-26
+            machine: arm64
+            wheel_tag: cp311.cp312.cp313.cp314-none-macosx_13_0_arm64
+          - target: darwin-amd64
+            runner: macos-26-intel
+            machine: x86_64
+            wheel_tag: cp311.cp312.cp313.cp314-none-macosx_13_0_x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout exact release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-release.outputs.release_sha }}
+
+      - name: Download generated formula
+        uses: actions/download-artifact@v4
+        with:
+          name: skill-scanner-homebrew-formula-${{ inputs.version }}-${{ github.run_id }}
+          path: generated-formula
+
+      - name: Install exact formula from source distribution
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          test "$(uname -m)" = "${{ matrix.machine }}"
+          # GitHub's Intel runners ship python.org Python 3.12 symlinks in
+          # /usr/local/bin, which block linking Homebrew's python@3.12 and leave
+          # its pip unusable; take the links over before installing.
+          brew install python@3.12 || brew link --overwrite python@3.12
+          # Homebrew refuses formulae outside a tap, so install from a throwaway local tap.
+          brew tap-new --no-git local/skill-scanner
+          tap_dir="$(brew --repository local/skill-scanner)"
+          install -m 644 generated-formula/skill-scanner.rb "$tap_dir/Formula/skill-scanner.rb"
+          brew install --build-from-source local/skill-scanner/skill-scanner
+
+      - name: Validate packaged helper architecture and rules
+        shell: bash
+        run: |
+          prefix="$(brew --prefix local/skill-scanner/skill-scanner)"
+          helper_root="$prefix/libexec"
+          helper_count="$(find "$helper_root" -type f -name 'skill-scanner-cel-go-darwin-*' | wc -l | tr -d ' ')"
+          test "$helper_count" = 1
+          helper="$(find "$helper_root" -type f -name 'skill-scanner-cel-go-darwin-*' -print -quit)"
+          manifest="$(find "$helper_root" -type f -path '*/skill_scanner/core/cel/_bin/manifest.json' -print -quit)"
+          test -n "$helper"
+          test -n "$manifest"
+          file "$helper" | grep -F "${{ matrix.machine }}"
+          "$(brew --prefix python@3.12)/bin/python3.12" - "$manifest" \
+            "${{ matrix.target }}" "${{ matrix.wheel_tag }}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          helper = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["helper"]
+          assert helper["target"] == sys.argv[2]
+          assert helper["wheel_tag"] == sys.argv[3]
+          assert helper["macos_minimum"] == "13.0"
+          assert helper["cel_go_version"] == "v0.32.0"
+          assert helper["toolchain_version"] == "go1.27.1"
+          PY
+          "$prefix/bin/skill-scanner" validate-rules
+          brew test local/skill-scanner/skill-scanner
+
+  commit-formula:
+    name: Open a pull request with the qualified formula
+    needs:
+      - generate-formula
+      - smoke-homebrew
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write  # dispatch the required unit tests on the formula branch
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Download qualified formula
+        uses: actions/download-artifact@v4
+        with:
+          name: skill-scanner-homebrew-formula-${{ inputs.version }}-${{ github.run_id }}
+          path: generated-formula
+
+      # main is protected by a ruleset that requires a pull request, so the formula
+      # goes to a branch and a pull request rather than straight to main.
+      - name: Push a branch and open a pull request
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          install -m 644 generated-formula/skill-scanner.rb Formula/skill-scanner.rb
+          git diff --quiet Formula/skill-scanner.rb && {
+            echo "No changes to formula — skipping pull request."
+            exit 0
+          }
+          branch="chore/homebrew-formula-${VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add Formula/skill-scanner.rb
+          git commit -m "chore: update Homebrew formula to ${VERSION}"
+          git push --force origin "$branch"
+          title="chore: update Homebrew formula to ${VERSION}"
+          body="Generated by the Update Homebrew Formula workflow (run ${GITHUB_RUN_ID}) from the ${VERSION} sdist; both macOS smoke installs passed."
+          if [ "$(gh pr list --head "$branch" --state open --json number --jq length)" = "0" ]; then
+            # Needs the repository setting "Allow GitHub Actions to create and approve
+            # pull requests".
+            if ! gh pr create --base main --head "$branch" --title "$title" --body "$body"; then
+              echo "::warning::Could not open the pull request automatically. Open it from ${branch}: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/main...${branch}?expand=1"
+              exit 0
+            fi
+          fi
+          # Pushes and pull requests made with GITHUB_TOKEN start no workflows, so
+          # dispatch the required unit tests on the branch head for the pull request.
+          gh workflow run python-tests.yml --ref "$branch"

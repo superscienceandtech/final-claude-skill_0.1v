@@ -1,0 +1,225 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+# Authoritative bundled rule-pack manifest. Implementations are validated
+# atomically against this schema-v2 identity at scanner startup.
+schema_version: 2
+name: promptguard
+version: 1.0.0
+author: 'Abhijoy Sarkar (community contribution via PR #89)'
+license: Apache-2.0
+source_url: https://github.com/cisco-ai-defense/skill-scanner/tree/699431857cc2021fed8d8fad9ec79c437bbae009/skill_scanner/data/packs/promptguard
+description: 'Data protection detection rules contributed directly to Skill Scanner in PR #89 under the PromptGuard pack name.
+  Covers PII detection, extended secret providers, and LLM-context exfiltration with 26 rules across 3 signature files. The
+  immutable in-repository contribution is the canonical source because the originally cited external repository is not public.
+
+  '
+rules:
+  PG_PII_SSN:
+    source: signature
+    category: data_exfiltration
+    taxonomy: AISubtech-8.5.10
+    severity: CRITICAL
+    knobs:
+      enabled: true
+    description: US Social Security Number embedded in skill package.
+  PG_PII_CREDIT_CARD:
+    source: signature
+    category: data_exfiltration
+    taxonomy: AISubtech-8.6.1
+    severity: CRITICAL
+    knobs:
+      enabled: true
+    description: Credit card number (Visa, MC, Amex, Discover) in skill package.
+  PG_PII_IBAN:
+    source: signature
+    category: data_exfiltration
+    taxonomy: AISubtech-8.6.2
+    severity: HIGH
+    knobs:
+      enabled: true
+    description: International Bank Account Number (IBAN) in skill package.
+  PG_PII_PHONE_HARVESTING:
+    source: signature
+    category: data_exfiltration
+    taxonomy: AISubtech-8.5.2
+    severity: HIGH
+    knobs:
+      enabled: true
+    description: Skill instructions to collect phone numbers from users.
+  PG_PII_SSN_HARVESTING:
+    source: signature
+    category: data_exfiltration
+    taxonomy: AISubtech-8.5.10
+    severity: CRITICAL
+    knobs:
+      enabled: true
+    description: Skill instructions to collect Social Security Numbers.
+  PG_PII_CARD_HARVESTING:
+    source: signature
+    category: data_exfiltration
+    taxonomy: AISubtech-8.6.1
+    severity: CRITICAL
+    knobs:
+      enabled: true
+    description: Skill instructions to collect credit card details.
+  PG_PII_CREDENTIAL_HARVESTING:
+    source: signature
+    category: data_exfiltration
+    taxonomy: AISubtech-14.1.1
+    severity: CRITICAL
+    knobs:
+      enabled: true
+    description: Skill instructions to collect passwords or credentials.
+  PG_PII_MEDICAL_ID:
+    source: signature
+    category: data_exfiltration
+    taxonomy: AISubtech-8.7.2
+    severity: HIGH
+    knobs:
+      enabled: true
+    description: US Medicare Beneficiary Identifier (HIPAA-protected PHI).
+  PG_SECRET_OPENAI_KEY:
+    source: signature
+    category: hardcoded_secrets
+    taxonomy: AISubtech-14.1.1
+    severity: CRITICAL
+    knobs:
+      enabled: true
+    description: Hardcoded OpenAI API key (sk-..., sk-proj-..., sk-svcacct-...).
+  PG_SECRET_ANTHROPIC_KEY:
+    source: signature
+    category: hardcoded_secrets
+    taxonomy: AISubtech-14.1.1
+    severity: CRITICAL
+    knobs:
+      enabled: true
+    description: Hardcoded Anthropic API key (sk-ant-...).
+  PG_SECRET_SLACK_TOKEN:
+    source: signature
+    category: hardcoded_secrets
+    taxonomy: AISubtech-14.1.1
+    severity: CRITICAL
+    knobs:
+      enabled: true
+    description: Hardcoded Slack bot/user/app token (xoxb-/xoxp-/xapp-).
+  PG_SECRET_SLACK_WEBHOOK:
+    source: signature
+    category: hardcoded_secrets
+    taxonomy: AISubtech-14.1.1
+    severity: HIGH
+    knobs:
+      enabled: true
+    description: Hardcoded Slack incoming webhook URL.
+  PG_SECRET_HUGGINGFACE_TOKEN:
+    source: signature
+    category: hardcoded_secrets
+    taxonomy: AISubtech-14.1.1
+    severity: HIGH
+    knobs:
+      enabled: true
+    description: Hardcoded Hugging Face access token (hf_...).
+  PG_SECRET_TWILIO_KEY:
+    source: signature
+    category: hardcoded_secrets
+    taxonomy: AISubtech-14.1.1
+    severity: HIGH
+    knobs:
+      enabled: true
+    description: Hardcoded Twilio API key or auth token.
+  PG_SECRET_SENDGRID_KEY:
+    source: signature
+    category: hardcoded_secrets
+    taxonomy: AISubtech-14.1.1
+    severity: HIGH
+    knobs:
+      enabled: true
+    description: Hardcoded SendGrid API key (SG....).
+  PG_SECRET_NPM_TOKEN:
+    source: signature
+    category: hardcoded_secrets
+    taxonomy: AISubtech-14.1.1
+    severity: CRITICAL
+    knobs:
+      enabled: true
+    description: Hardcoded npm access token (npm_...).
+  PG_SECRET_PYPI_TOKEN:
+    source: signature
+    category: hardcoded_secrets
+    taxonomy: AISubtech-14.1.1
+    severity: CRITICAL
+    knobs:
+      enabled: true
+    description: Hardcoded PyPI API token (pypi-...).
+  PG_SECRET_DISCORD_TOKEN:
+    source: signature
+    category: hardcoded_secrets
+    taxonomy: AISubtech-14.1.1
+    severity: CRITICAL
+    knobs:
+      enabled: true
+    description: Hardcoded Discord bot token.
+  PG_SECRET_AZURE_KEY:
+    source: signature
+    category: hardcoded_secrets
+    taxonomy: AISubtech-14.1.1
+    severity: CRITICAL
+    knobs:
+      enabled: true
+    description: Hardcoded Azure Cognitive Services or Azure OpenAI key.
+  PG_SECRET_DIGITALOCEAN_TOKEN:
+    source: signature
+    category: hardcoded_secrets
+    taxonomy: AISubtech-14.1.1
+    severity: CRITICAL
+    knobs:
+      enabled: true
+    description: Hardcoded DigitalOcean personal access token (dop_v1_...).
+  PG_EXFIL_MARKDOWN_IMAGE:
+    source: signature
+    category: data_exfiltration
+    taxonomy: AISubtech-8.2.3
+    severity: CRITICAL
+    knobs:
+      enabled: true
+    description: Markdown image tag exfiltrating data via URL query parameters.
+  PG_EXFIL_MARKDOWN_LINK:
+    source: signature
+    category: data_exfiltration
+    taxonomy: AISubtech-8.2.3
+    severity: HIGH
+    knobs:
+      enabled: true
+    description: Markdown link smuggling sensitive data in constructed URLs.
+  PG_EXFIL_HTML_TAG:
+    source: signature
+    category: data_exfiltration
+    taxonomy: AISubtech-8.2.3
+    severity: HIGH
+    knobs:
+      enabled: true
+    description: HTML tag injection with dynamic URL for data exfiltration.
+  PG_EXFIL_DATA_URI:
+    source: signature
+    category: data_exfiltration
+    taxonomy: AISubtech-9.1.4
+    severity: HIGH
+    knobs:
+      enabled: true
+    description: Data URI with executable MIME type (script/HTML smuggling).
+  PG_EXFIL_URL_ENCODING:
+    source: signature
+    category: data_exfiltration
+    taxonomy: AISubtech-8.2.3
+    severity: HIGH
+    knobs:
+      enabled: true
+    description: Instructions to encode secrets/context into URLs for exfiltration.
+  PG_EXFIL_INVISIBLE_PAYLOAD:
+    source: signature
+    category: data_exfiltration
+    taxonomy: AISubtech-8.2.3
+    severity: CRITICAL
+    knobs:
+      enabled: true
+    description: Steganographic encoding to hide exfiltrated data in invisible characters.

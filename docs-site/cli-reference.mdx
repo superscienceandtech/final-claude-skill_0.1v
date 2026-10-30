@@ -1,0 +1,296 @@
+---
+title: "CLI Reference"
+description: "Skill Scanner CLI reference for scanning local skills or GitHub repositories, enabling OSV and LLM analysis, applying policies, and exporting reports."
+order: 7
+---
+
+## CLI Reference
+
+Skill Scanner provides three entry points: `skill-scanner` (main CLI), `skill-scanner-api` (REST API server), and `skill-scanner-pre-commit` (pre-commit hook).
+
+---
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| *(no command)* | Launch interactive scan wizard |
+| `scan` | Scan a single skill directory |
+| `scan-all` | Scan multiple skills in a directory |
+| `scan-repo` | Clone a public GitHub repository and recursively scan its skills |
+| `generate-policy` | Generate a scan policy YAML from a preset |
+| `configure-policy` | Interactive TUI for editing policy |
+| `list-analyzers` | Show available analyzers and their activation flags |
+| `validate-rules` | Validate selected packs and compile/type-check CEL |
+
+---
+
+### `skill-scanner scan`
+
+Scan a single skill directory.
+
+```bash
+skill-scanner scan /path/to/skill [OPTIONS]
+```
+
+#### Analyzer Flags
+
+| Flag | Description |
+|------|-------------|
+| `--use-behavioral` | Enable behavioral analyzer (AST dataflow analysis) |
+| `--use-llm` | Enable LLM analyzer (requires API key) |
+| `--llm-provider` | LLM shortcut: `anthropic`, `openai`, or `openai-compatible` |
+| `--llm-consensus-runs N` | Run LLM analysis N times; keep majority-agreed findings (N times the cost; not measured on the evaluation splits) |
+| `--llm-max-tokens N` | Override the LLM response-token budget (default: 8192) |
+| `--llm-decompose` | Run the LLM analyzer once per focus and union the findings instead of one general pass; raises recall at roughly 3x the model calls |
+| `--system-one-endpoint URL` | Optional System One screening endpoint (`POST /v1/systemone`). Advisory only: it can never change a finding, a severity, or the verdict |
+| `--system-one-model NAME` | Model name for the System One endpoint; required with `--system-one-endpoint` and rejected without it |
+| `--use-virustotal` | Enable VirusTotal binary scanner |
+| `--use-aidefense` | Enable Cisco AI Defense analyzer |
+| `--use-osv` | Query OSV.dev for advisories affecting exactly pinned Python and JavaScript dependencies; no API key required |
+| `--use-trigger` | Enable trigger specificity analyzer |
+| `--enable-meta` | Enable the meta-analyzer. Off by default and not recommended: it cost 16.4 points of recall in measurement |
+| `--adjudicate` | Demote-only LLM review of deterministic HIGH/CRITICAL literal-regex false positives |
+
+#### Output Flags
+
+| Flag | Description |
+|------|-------------|
+| `--format` | Output format; repeat to produce multiple reports in one run |
+| `--output PATH` | Default report path |
+| `--output-json`, `--output-sarif`, `--output-markdown`, `--output-html`, `--output-table` | Per-format output paths |
+| `--detailed` | Include full finding details (markdown format) |
+| `--render-markdown` / `--no-render-markdown` | Override terminal Markdown rendering |
+
+#### Policy and Rules
+
+| Flag | Description |
+|------|-------------|
+| `--policy` | Preset name (`strict`, `balanced`, `permissive`, `low-noise`, `quiet`) or path to custom YAML |
+| `--custom-rules PATH` | Use custom YARA rules from directory |
+| `--rule-packs PACK...` | Enable packs such as `atr` and `promptguard`; use `--rule-packs list` to inspect packs |
+| `--trusted-rule-pack PATH` | Load an administrator-trusted schema-v2 signature/YARA/CEL pack; repeatable |
+| `--cel-mode MODE` | Override policy CEL mode with `off`, `shadow`, or `enforce` |
+| `--taxonomy PATH` | Override the Cisco AI taxonomy JSON/YAML |
+| `--threat-mapping PATH` | Override the threat mapping JSON |
+| `--fail-on-severity LEVEL` | Exit with error if findings at or above LEVEL exist |
+
+#### Behavior Flags
+
+| Flag | Description |
+|------|-------------|
+| `--lenient` | Tolerate malformed skills instead of failing |
+| `--skill-file NAME` | Use a custom metadata filename instead of `SKILL.md` |
+
+#### Examples
+
+```bash
+# Core analyzers only: a first test that the CLI works (add --use-llm for real use)
+skill-scanner scan ./my-skill
+
+# Vetting a third-party skill: rules + LLM judge, block HIGH (see Recommended Settings)
+skill-scanner scan ./my-skill --use-llm --policy balanced --fail-on-severity high
+
+# Lowest false-positive rate with the judge
+skill-scanner scan ./my-skill --use-llm --policy quiet --fail-on-severity high
+
+# Every engine, for an audit you read in full
+skill-scanner scan ./my-skill --use-behavioral --use-llm --use-osv --use-aidefense
+
+# Review deterministic HIGH/CRITICAL matches before LLM enrichment
+skill-scanner scan ./my-skill --adjudicate
+
+# Decomposed judge: three focused passes, about three times the tokens, for high-stakes reviews
+skill-scanner scan ./my-skill --use-llm --llm-decompose
+
+# Generate interactive HTML report
+skill-scanner scan ./my-skill --use-llm --format html --output report.html
+
+# Produce JSON and SARIF in one scan
+skill-scanner scan ./my-skill --format json --format sarif \
+  --output-json results.json --output-sarif results.sarif
+
+# CI/CD: rules + judge, fail on high-severity findings
+skill-scanner scan ./my-skill --use-llm --policy low-noise --fail-on-severity high --format sarif --output results.sarif
+
+# Scan a non-standard skill format (e.g., Claude Code commands)
+skill-scanner scan .claude/commands/deploy --lenient
+```
+
+---
+
+### `skill-scanner scan-all`
+
+Scan multiple skills in a directory.
+
+```bash
+skill-scanner scan-all /path/to/skills [OPTIONS]
+```
+
+Supports all flags from `scan`, plus:
+
+| Flag | Description |
+|------|-------------|
+| `--recursive` | Recursively discover skills in subdirectories |
+| `--check-overlap` | Detect coordinated attacks across skills |
+
+#### Examples
+
+```bash
+# Scan all skills recursively
+skill-scanner scan-all ./skills --recursive --format table
+
+# Cross-skill analysis
+skill-scanner scan-all ./skills --recursive --check-overlap
+
+# CI/CD gate with SARIF output
+skill-scanner scan-all ./skills --recursive --format sarif --output results.sarif --fail-on-severity high
+```
+
+---
+
+### `skill-scanner scan-repo`
+
+Clone a public GitHub repository into a temporary directory and recursively discover and scan skills. The temporary clone is removed when scanning finishes.
+
+```bash
+skill-scanner scan-repo owner/repo
+skill-scanner scan-repo https://github.com/owner/repo --use-osv --check-overlap
+```
+
+`scan-repo` supports the shared analyzer, policy, rule-pack, output, and CI-gating flags. Recursive discovery is on by default; pass `--no-recursive` to disable it.
+
+---
+
+### `skill-scanner generate-policy`
+
+Generate a scan policy YAML from a built-in preset for customization.
+
+```bash
+skill-scanner generate-policy [OPTIONS]
+```
+
+| Flag | Description |
+|------|-------------|
+| `-o, --output PATH` | Output file path |
+| `--preset NAME` | Base preset: `strict`, `balanced`, `permissive`, `low-noise`, `quiet` |
+
+```bash
+skill-scanner generate-policy -o my_policy.yaml --preset low-noise
+```
+
+---
+
+### `skill-scanner configure-policy`
+
+Interactive terminal UI for building or editing a custom scan policy.
+
+```bash
+skill-scanner configure-policy [OPTIONS]
+```
+
+| Flag | Description |
+|------|-------------|
+| `-i, --input PATH` | Existing policy YAML to edit |
+| `-o, --output PATH` | Output file path |
+
+```bash
+skill-scanner configure-policy -i my_policy.yaml -o my_policy.yaml
+```
+
+---
+
+### `skill-scanner list-analyzers`
+
+Show all available analyzers with their activation requirements.
+
+```bash
+skill-scanner list-analyzers
+```
+
+---
+
+### `skill-scanner validate-rules`
+
+Validate bundled rules and optional trusted schema-v2 packs, including CEL
+parse/type checks with the bundled helper.
+
+```bash
+skill-scanner validate-rules [OPTIONS]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--rules-file PATH` | Path to custom rules to validate |
+| `--trusted-rule-pack PATH` | Administrator-trusted schema-v2 pack; repeatable |
+
+```bash
+# Validate built-in rules
+skill-scanner validate-rules
+
+# Validate custom rules
+skill-scanner validate-rules --rules-file /path/to/custom
+
+# Validate an administrator-approved signature/YARA/CEL pack
+skill-scanner validate-rules --trusted-rule-pack /path/to/org-pack
+```
+
+---
+
+### `skill-scanner-api`
+
+Start the REST API server.
+
+```bash
+skill-scanner-api [OPTIONS]
+```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--host` | Bind address | `localhost` |
+| `--port` | Port number | `8000` |
+| `--reload` | Enable auto-reload for development | Off |
+
+```bash
+skill-scanner-api --host 127.0.0.1 --port 9000
+```
+
+See [API Reference](/docs/skill-scanner/api-reference) for endpoint documentation.
+
+---
+
+### `skill-scanner-pre-commit`
+
+Manage the pre-commit hook.
+
+```bash
+skill-scanner-pre-commit --install  # Install the built-in Git hook
+skill-scanner-pre-commit --scan-all # Scan all configured skills
+```
+
+By default, the hook maps changed files to their nearest parent `SKILL.md` and scans each affected skill once. In CI, pre-commit supplies changed paths between two revisions:
+
+```bash
+pre-commit run skill-scanner --from-ref "$BASE_SHA" --to-ref "$HEAD_SHA"
+```
+
+Configure direct-hook behavior via `.skill_scannerrc`, `.skill_scannerrc.json`, or `skill_scanner.json`:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `severity_threshold` | `"high"` | Block commits at this severity or above |
+| `skills_path` | `".claude/skills"` | Base path for skills under the repo root |
+| `fail_fast` | `true` | Stop on first skill exceeding threshold |
+| `use_behavioral` | `false` | Enable behavioral analyzer |
+| `use_trigger` | `true` | Enable trigger specificity analyzer |
+| `policy` | — | Preset name or path to custom policy YAML |
+
+---
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Scan completed, no findings above threshold |
+| `1` | Findings at or above the `--fail-on-severity` threshold detected |
+| `2` | Error during scan (invalid path, configuration error, etc.) |
